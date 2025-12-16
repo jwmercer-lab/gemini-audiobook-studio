@@ -58,4 +58,4 @@ pip install -r requirements.txt
 * **[L]isten:** (If available) plays the failed audio so you can decide if it's actually acceptable.
 
 ## License
-Open Source.
+MIT License.
