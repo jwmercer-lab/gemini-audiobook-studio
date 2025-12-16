@@ -112,11 +112,30 @@ def generate_silence(duration_sec):
     num_samples = int(SAMPLE_RATE * duration_sec)
     return b'\x00\x00' * num_samples
 
-def check_audio_health(audio_bytes, threshold=100, max_silence_sec=2.0):
+def check_audio_health(audio_bytes, text_len, threshold=100, max_silence_sec=2.0):
+    """
+    Analyzes audio for:
+    1. Low Volume (RMS)
+    2. Dead Air (Silence)
+    3. Hallucination Loops (Duration vs Text Length)
+    """
     if not audio_bytes: return False, "Empty Data"
     total_samples = len(audio_bytes) // 2
     if total_samples == 0: return False, "Zero Samples"
 
+    # --- 1. DURATION CHECK (Loop Detection) ---
+    duration_sec = total_samples / SAMPLE_RATE
+    
+    # Heuristic: English narration is rarely slower than 12 chars/sec.
+    # If duration is significantly longer than text warrants, it's likely repeating.
+    # We add a small buffer (5s) to avoid flagging very short valid clips.
+    MIN_CHARS_PER_SEC = 12.0
+    max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 5.0
+
+    if duration_sec > max_allowed_duration:
+        return False, f"Suspected Loop ({duration_sec:.1f}s > {max_allowed_duration:.1f}s limit)"
+
+    # --- 2. SILENCE & VOLUME CHECK ---
     current_silence_run = 0
     longest_silence_run = 0
     sum_squares = 0
@@ -136,6 +155,7 @@ def check_audio_health(audio_bytes, threshold=100, max_silence_sec=2.0):
                     longest_silence_run = current_silence_run
                 current_silence_run = 0
         
+        # Catch tail silence
         if current_silence_run > longest_silence_run:
             longest_silence_run = current_silence_run
             
@@ -215,6 +235,9 @@ def process_chunk_task(task_data):
     index, text, voice, key, model = task_data
     max_retries = 3
     
+    # Calculate text length for the loop check
+    text_len = len(text)
+    
     for attempt in range(max_retries):
         result = generate_audio_with_pauses(text, voice, key, model)
         
@@ -229,7 +252,9 @@ def process_chunk_task(task_data):
                 continue
 
         if result:
-            is_healthy, reason = check_audio_health(result, max_silence_sec=QC_STRICT_SILENCE)
+            # PASS TEXT LEN HERE vvv
+            is_healthy, reason = check_audio_health(result, text_len, max_silence_sec=QC_STRICT_SILENCE)
+            
             if is_healthy:
                 fname = f"chunk_{index:04d}.pcm"
                 with open(fname, "wb") as f: f.write(result)
@@ -393,7 +418,8 @@ def main():
                     if res and isinstance(res, bytes):
                         fname = f"chunk_{i:04d}.pcm"
                         with open(fname, "wb") as f: f.write(res)
-                        is_healthy, reason = check_audio_health(res, max_silence_sec=QC_STRICT_SILENCE)
+                        # UPDATE: Pass len
+                        is_healthy, reason = check_audio_health(res, len(chunks[i]), max_silence_sec=QC_STRICT_SILENCE)
                         results[i] = (is_healthy, fname, "OK" if is_healthy else reason)
                     else:
                         results[i] = (False, None, f"API Error: {res}")
@@ -404,7 +430,8 @@ def main():
                     if res and isinstance(res, bytes):
                         fname = f"chunk_{i:04d}.pcm"
                         with open(fname, "wb") as f: f.write(res)
-                        is_healthy, reason = check_audio_health(res, max_silence_sec=QC_STRICT_SILENCE)
+                        # UPDATE: Pass len
+                        is_healthy, reason = check_audio_health(res, len(chunks[i]), max_silence_sec=QC_STRICT_SILENCE)
                         results[i] = (is_healthy, fname, "OK" if is_healthy else reason)
                     else:
                         results[i] = (False, None, f"API Error: {res}")
@@ -434,14 +461,16 @@ def main():
                         res = generate_audio_with_pauses(chunks[i], reader_voice, api_key, selected_model)
                         if res and isinstance(res, bytes):
                             with open(fname, "wb") as f: f.write(res)
-                            is_healthy, reason = check_audio_health(res, max_silence_sec=QC_STRICT_SILENCE)
+                            # UPDATE: Pass len
+                            is_healthy, reason = check_audio_health(res, len(chunks[i]), max_silence_sec=QC_STRICT_SILENCE)
                             results[i] = (is_healthy, fname, "OK" if is_healthy else reason)
                     elif choice == 'r':
                         print("    Regenerating...")
                         res = generate_audio_with_pauses(chunks[i], reader_voice, api_key, selected_model)
                         if res and isinstance(res, bytes):
                             with open(fname, "wb") as f: f.write(res)
-                            is_healthy, reason = check_audio_health(res, max_silence_sec=QC_STRICT_SILENCE)
+                            # UPDATE: Pass len
+                            is_healthy, reason = check_audio_health(res, len(chunks[i]), max_silence_sec=QC_STRICT_SILENCE)
                             results[i] = (is_healthy, fname, "OK" if is_healthy else reason)
                 else:
                     segment_files.append(fname)
