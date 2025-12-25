@@ -1,19 +1,21 @@
-# Python Cache
+# Python artifacts
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Audio Output & Temp Files
+# Distribution / Install
+venv/
+env/
+.env
+
+# Project Output (IMPORTANT)
+output/
+*.pcm
 *.wav
 *.mp3
-*.pcm
-chunk_*.pcm
-temp_master.wav
-preview.wav
 
-# Editor Temp Files
+# Editor temp files
 studio_quick_edit.txt
-
-# Environment & Config
-.env
-config.json
-.DS_Store
+.vscode/
+.idea/
+*.swp
