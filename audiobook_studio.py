@@ -32,8 +32,8 @@ except ImportError:
 
 # --- CONSTANTS ---
 MODELS = {
-    "1": "gemini-2.5-flash-tts", # High Limits
-    "2": "gemini-2.5-pro-tts"    # Strict Limit
+    "1": "gemini-2.5-flash-preview-tts", # High Limits
+    "2": "gemini-2.5-pro-preview-tts"    # Strict Limit
 }
 
 VOICES = {
