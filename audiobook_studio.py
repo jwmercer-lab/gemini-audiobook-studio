@@ -30,6 +30,13 @@ except ImportError:
     PYDUB_AVAILABLE = False
     print("\n[!] Warning: 'pydub' library not found. Output will be .WAV instead of .MP3.")
 
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    print("\n[!] 'tqdm' not found. Progress bar disabled. (pip install tqdm)")
+
 # --- CONSTANTS ---
 MODELS = {
     "1": "gemini-2.5-flash-preview-tts", # High Limits
@@ -188,7 +195,9 @@ def generate_audio_raw(text, voice_name, api_key, model_name):
     }
     
     try:
-        response = requests.post(url, json=payload)
+        # TIMEOUT ADDED: 120 seconds to account for long generation queues
+        response = requests.post(url, json=payload, timeout=120)
+        
         if response.status_code == 429: return "RATE_LIMIT"
         if response.status_code != 200: return f"API_ERR_{response.status_code}"
             
@@ -197,6 +206,9 @@ def generate_audio_raw(text, voice_name, api_key, model_name):
         
         audio_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
         return base64.b64decode(audio_b64)
+
+    except requests.exceptions.Timeout:
+        return "EXCEPTION_TIMEOUT"
     except Exception as e:
         return f"EXCEPTION_{str(e)}"
 
@@ -383,26 +395,50 @@ def main():
     clean_text = raw_text.replace('“', '"').replace('”', '"')
     chunks = smart_chunk_text(clean_text, CHUNK_LIMIT)
     
+    tasks = [(i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, not resume_mode) for i in range(len(chunks))]
+    results = [None] * len(chunks) 
+    
+    # Need to import as_completed for the progress bar logic
+    from concurrent.futures import as_completed
+
     print(f"\n[Plan] Book split into {len(chunks)} chunks.")
     print(f"[Execution] Launching {max_workers} workers...")
     print("------------------------------------------------")
 
-    tasks = [(i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, not resume_mode) for i in range(len(chunks))]
-    results = [None] * len(chunks) 
-    
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
+        
+        # 1. SUBMISSION PHASE
+        # We submit sequentially to respect the stagger delay (preventing instant rate limits)
+        print("Initializing tasks...")
         for task in tasks:
             f = executor.submit(process_chunk_task, task)
             futures.append(f)
+            # Stagger submissions to avoid hitting API rate limits instantly
             time.sleep(0.1 if resume_mode else stagger_delay)
             
-        for i, future in enumerate(futures):
+        # 2. MONITORING PHASE
+        # We wrap as_completed so the bar updates as threads finish, regardless of order
+        iterator = as_completed(futures)
+        
+        if TQDM_AVAILABLE:
+            iterator = tqdm(iterator, total=len(chunks), unit="chunk", desc="Processing", ncols=100)
+            
+        for future in iterator:
             idx, success, fname, msg = future.result()
-            results[idx] = (success, fname, msg)
+            results[idx] = (success, fname, msg) # Store result in correct index
+            
             status = "OK" if success else "FAIL"
-            if msg != "Cached/Skipped":
-                safe_print(f"[Completed] Chunk {idx+1}: {status} ({msg})")
+            
+            # If using TQDM, use .write() to print above the bar without breaking it
+            # If valid/cached, we stay silent to keep UI clean, unless it failed.
+            if TQDM_AVAILABLE:
+                if not success or (msg != "Cached/Skipped"):
+                    tqdm.write(f"[Chunk {idx+1}] {status}: {msg}")
+            else:
+                # Fallback for no TQDM
+                if msg != "Cached/Skipped":
+                    safe_print(f"[Completed] Chunk {idx+1}: {status} ({msg})")
 
     # --- REVIEW PHASE ---
     director_mode = input("\nEnable Director Review (Check/Retry files)? (y/n) [y]: ").lower() != 'n'
