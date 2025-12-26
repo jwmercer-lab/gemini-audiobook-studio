@@ -309,11 +309,28 @@ def process_chunk_task(task_data):
     index, text, voice, key, model, output_dir, force_regen, gender_cat = task_data
     
     filename = os.path.join(output_dir, f"chunk_{index:04d}.pcm")
+    text_filename = os.path.join(output_dir, f"chunk_{index:04d}.txt")
     
     # RESUME CHECK
+    # Smart Resume: We verify that the chunk exists AND the text inside matches exactly.
     if not force_regen and os.path.exists(filename):
-        if os.path.getsize(filename) > 0:
-            return (index, True, filename, "Cached/Skipped")
+        is_valid_resume = False
+        
+        if os.path.exists(text_filename):
+            try:
+                with open(text_filename, "r", encoding="utf-8") as f:
+                    cached_text = f.read()
+                if cached_text == text:
+                    is_valid_resume = True
+            except:
+                pass
+        
+        # NOTE: If the .txt file is missing (legacy runs), we treat it as INVALID and regenerate.
+        # This prevents misalignment if you changed settings between runs.
+        
+        if is_valid_resume:
+            if os.path.getsize(filename) > 0:
+                return (index, True, filename, "Cached/Skipped")
 
     max_retries = 3
     text_len = len(text)
@@ -336,7 +353,13 @@ def process_chunk_task(task_data):
             is_healthy, reason = check_audio_health(result, text_len, target_gender=gender_cat, max_silence_sec=QC_STRICT_SILENCE)
             
             if is_healthy:
+                # SAVE AUDIO
                 with open(filename, "wb") as f: f.write(result)
+                # SAVE TEXT VERIFICATION CARD
+                try:
+                    with open(text_filename, "w", encoding="utf-8") as f: f.write(text)
+                except: pass
+                
                 return (index, True, filename, "OK")
             else:
                 safe_print(f"  [Worker {index+1}] QC Fail: {reason}. Retrying ({attempt+1}/{max_retries})...")
@@ -423,13 +446,14 @@ def main():
     
     if existing_chunks:
         print(f"\n[!] Found {len(existing_chunks)} existing chunks in '{chunks_dir}'.")
-        choice = input("    [R]esume (Skip generated) | [O]verwrite (Delete all): ").lower().strip()
+        print("    NOTE: Resume now enforces text verification. Legacy files without .txt verification cards will be regenerated.")
+        choice = input("    [R]esume (Skip verified) | [O]verwrite (Delete all): ").lower().strip()
         if choice == 'o':
             print("    Deleting old chunks...")
             for f in existing_chunks: os.remove(f)
         else:
             resume_mode = True
-            print("    Resume mode enabled. Existing valid chunks will be skipped.")
+            print("    Resume mode enabled.")
 
     input_file = get_user_input("Input Text File", "el_standard.txt")
     raw_text = ""

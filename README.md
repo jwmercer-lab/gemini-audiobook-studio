@@ -8,7 +8,8 @@ A high-performance Python studio for generating long-form audiobooks using Googl
 
 * **Project Management:** Automatically organizes output into `output/{ProjectName}/` folders, keeping your artifacts clean and separated.
 
-* **Resume Capability:** Crash protection. If the script stops, simply run it again with the same project name. It detects existing chunks and asks if you want to **Resume** (skipping already-generated files) or **Overwrite**.
+* **Smart Resume & Text Verification:** If you stop and restart a project, the script doesn't just check if a file exists—it checks if the *text* matches.
+  * **Safe Limit Adjustments:** You can change the character limit or edit your source text between runs. The script reads the `.txt` verification card for each existing chunk. If the text has shifted due to a new character limit, it automatically invalidates and regenerates that specific chunk while keeping the valid ones.
 
 * **Interactive Budget Calculator:** Before generating, the script enters a planning loop. It calculates exactly how many requests your project requires based on your character limit and compares it to your daily API quota.
     * **Safety Margin:** It explicitly tells you how many "spare" requests you have for retries.
