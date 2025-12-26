@@ -232,7 +232,8 @@ def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=10
     # 4. Loop Check
     duration_sec = total_samples / SAMPLE_RATE
     MIN_CHARS_PER_SEC = 12.0
-    max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 5.0
+    # RELAXED THRESHOLD: Increased buffer from 5.0 to 10.0 to prevent false flags on slow reads
+    max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 10.0
 
     if duration_sec > max_allowed_duration:
         return False, f"Suspected Loop ({duration_sec:.1f}s > {max_allowed_duration:.1f}s limit)"
@@ -450,7 +451,7 @@ def main():
         stagger_delay = 0.5 
     else:
         max_workers = 4 
-        stagger_delay = 2.0  # REDUCED from 15.0 to 2.0 to show Status Bar faster
+        stagger_delay = 15.0  # REVERTED to 15.0 for Stability (Rate Limits count as requests)
 
     print("\n--- Narrator Selection ---")
     narrator_gender = input("Narrator Gender (m/f): ").lower()
