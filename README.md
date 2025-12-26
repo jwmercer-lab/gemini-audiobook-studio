@@ -10,17 +10,22 @@ A high-performance Python studio for generating long-form audiobooks using Googl
 
 * **Resume Capability:** Crash protection. If the script stops, simply run it again with the same project name. It detects existing chunks and asks if you want to **Resume** (skipping already-generated files) or **Overwrite**.
 
+* **Interactive Budget Calculator:** Before generating, the script enters a planning loop. It calculates exactly how many requests your project requires based on your character limit and compares it to your daily API quota.
+    * **Safety Margin:** It explicitly tells you how many "spare" requests you have for retries.
+    * **Tuning:** You can adjust the character limit up or down in real-time to find the sweet spot between audio quality (shorter chunks) and quota efficiency (longer chunks).
+
+* **Daily Batching:** specific feature for low-quota environments (like the 50 RPD limit on Pro). You can tell the script to process only a set number of chunks (e.g., "Run 20 chunks"). This allows you to spread a large project over several days without hitting quota errors.
+
 * **Pause Handling (Scene Breaks):** Supports custom silence tags. Insert `<break time="2.0s" />` directly into your text file to create dramatic pauses or scene transitions (replacing traditional `***` breaks).
 
 * **Smart Quality Control (QC):** Automatically flags audio defects using signal analysis:
-
   * **Dead Air:** Detects excessive silence.
-
   * **Hallucination Loops:** Flags clips that are impossibly long for the text provided.
-
   * **Metallic/Robotic Noise:** Uses Zero-Crossing Rate (ZCR) to detect "buzzy" audio artifacts.
-
   * **Monotone Voices:** Analyzes dynamic range to flag "flat" or bored-sounding generations.
+  * **Voice Drift Sentry:** Uses Harmonic Product Spectrum (HPS) pitch detection to ensure the narrator stays in character.
+    * **Male Mode:** Flags if pitch drifts too high (>175Hz), indicating a female/child hallucination.
+    * **Female Mode:** Flags if pitch drifts too low (<155Hz), indicating a male hallucination.
 
 * **Director Mode with Context:** An interactive review phase allowing you to audit, edit, and retry clips. Includes **Contextual Preview**, which plays the last 3 seconds of the *previous* chunk before the current one to ensure accent and tone continuity.
 
@@ -91,11 +96,25 @@ Since you are running this primarily on Linux, here is the fast track:
 
 2. Follow the prompts:
 
-   * **Project Name:** Defines the output folder (e.g., output/FracturedSunbeams/).
+   * **Project Name:** Defines the output folder (e.g., output/`title`/).
 
    * **Resume/Overwrite:** If chunks exist in that folder, you can Resume to save time.
 
    * **Model & Voice:** Choose your settings.
+
+3. **Budget Loop:** The script will show the default chunk limit (1500 for Flash, 2400 for Pro).
+
+   * Press ENTER to calculate the plan.
+
+   * Review the **Safety Margin** (spare requests).
+
+   * If the margin is negative or too tight, enter a lower character limit to reduce the chunk count, or accept the risk.
+
+4. **Batch Limit**
+
+   * Press ENTER to run the whole project.
+
+   *Or enter a number (e.g., `40`) to only run that many chunks. You can run the script again tomorrow to finish the rest.
 
 ### Director Mode Guide
 

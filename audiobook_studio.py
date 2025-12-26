@@ -43,6 +43,18 @@ MODELS = {
     "2": "gemini-2.5-pro-preview-tts"    # Strict Limit
 }
 
+# Recommended character limits based on model stability
+RECOMMENDED_LIMITS = {
+    "gemini-2.5-flash-preview-tts": 1500,
+    "gemini-2.5-pro-preview-tts": 2400
+}
+
+# Daily Request Limits (RPD)
+RPD_LIMITS = {
+    "gemini-2.5-flash-preview-tts": 100, 
+    "gemini-2.5-pro-preview-tts": 50     
+}
+
 VOICES = {
     "Male": {
         "1": ("Fenrir", "Deep/Imposing"),
@@ -60,20 +72,27 @@ VOICES = {
     }
 }
 
-CHUNK_LIMIT = 3000
 SAMPLE_RATE = 24000
 
 # --- QUALITY CONTROL THRESHOLDS ---
 QC_STRICT_SILENCE = 3.0
-QC_ZCR_THRESHOLD = 0.20      # Default: 0.20. (0.25=Robots only, 0.18-0.20=Hiss/Static)
-QC_RMS_STD_THRESHOLD = 150   # Default: 150. (Higher=Stricter on Monotone)
+QC_ZCR_THRESHOLD = 0.20      # Hiss Detection
+QC_RMS_STD_THRESHOLD = 150   # Monotone Detection
+
+# Pitch Thresholds (Hz) - Used to detect gender swaps
+QC_PITCH_MALE_MAX = 175.0    # Above this? Likely female/child hallucination.
+QC_PITCH_FEMALE_MIN = 155.0  # Below this? Likely male hallucination.
 
 # Thread-safe printing
 print_lock = threading.Lock()
 
 def safe_print(msg):
+    """Thread-safe print that plays nicely with TQDM progress bars."""
     with print_lock:
-        print(msg)
+        if TQDM_AVAILABLE:
+            tqdm.write(msg)
+        else:
+            print(msg)
 
 def get_user_input(prompt, default=None):
     if default:
@@ -118,6 +137,42 @@ def generate_silence(duration_sec):
     num_samples = int(SAMPLE_RATE * duration_sec)
     return b'\x00\x00' * num_samples
 
+def estimate_fundamental_freq(audio_bytes, sample_rate=24000):
+    """
+    Estimates the fundamental frequency (pitch) using Harmonic Product Spectrum.
+    Useful for detecting if a male voice suddenly becomes female (pitch jump).
+    """
+    if not NUMPY_AVAILABLE: return 0.0
+    
+    try:
+        # Convert PCM to float array
+        data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+        N = len(data)
+        if N < sample_rate * 0.5: return 0.0 # Too short to analyze accurately
+        
+        # Windowing to reduce spectral leakage
+        window = np.hanning(N)
+        
+        # FFT
+        spectrum = np.abs(np.fft.rfft(data * window))
+        freqs = np.fft.rfftfreq(N, 1/sample_rate)
+        
+        # HPS (Harmonic Product Spectrum) - Downsample and multiply to find fundamental
+        hps = np.copy(spectrum)
+        for h in range(2, 4): 
+            decimated = spectrum[::h]
+            hps[:len(decimated)] *= decimated
+            
+        # Limit search to human voice range (50Hz - 400Hz)
+        valid_idx = np.where((freqs > 60) & (freqs < 400))[0]
+        if len(valid_idx) == 0: return 0.0
+        
+        peak_idx = valid_idx[np.argmax(hps[valid_idx])]
+        return freqs[peak_idx]
+        
+    except Exception:
+        return 0.0
+
 def analyze_signal_metrics(audio_bytes, sample_rate=24000):
     if not NUMPY_AVAILABLE: return 0.0, 100.0, 1000.0
     
@@ -149,20 +204,32 @@ def analyze_signal_metrics(audio_bytes, sample_rate=24000):
         safe_print(f"    [QC Error] Analysis failed: {e}")
         return 0.0, 1000.0, 1000.0
 
-def check_audio_health(audio_bytes, text_len, threshold=100, max_silence_sec=2.0):
+def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=100, max_silence_sec=2.0):
     if not audio_bytes: return False, "Empty Data"
     total_samples = len(audio_bytes) // 2
     if total_samples == 0: return False, "Zero Samples"
 
     zcr, avg_rms, rms_std = analyze_signal_metrics(audio_bytes)
+    pitch = estimate_fundamental_freq(audio_bytes)
     
+    # 1. Artifact Checks
     if zcr > QC_ZCR_THRESHOLD: 
         return False, f"Metallic/Hissy Artifact (ZCR: {zcr:.2f})"
     if avg_rms < 50: 
         return False, f"Low Volume (RMS: {int(avg_rms)})"
+    
+    # 2. Gender/Pitch Consistency Check
+    if pitch > 0:
+        if target_gender == "Male" and pitch > QC_PITCH_MALE_MAX:
+            return False, f"Voice Drift Detected (Pitch High: {int(pitch)}Hz > {int(QC_PITCH_MALE_MAX)}Hz)"
+        if target_gender == "Female" and pitch < QC_PITCH_FEMALE_MIN:
+            return False, f"Voice Drift Detected (Pitch Low: {int(pitch)}Hz < {int(QC_PITCH_FEMALE_MIN)}Hz)"
+
+    # 3. Monotone Check
     if rms_std < QC_RMS_STD_THRESHOLD:
         return False, f"Monotone/Flat Dynamics (StdDev: {int(rms_std)})"
 
+    # 4. Loop Check
     duration_sec = total_samples / SAMPLE_RATE
     MIN_CHARS_PER_SEC = 12.0
     max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 5.0
@@ -195,8 +262,8 @@ def generate_audio_raw(text, voice_name, api_key, model_name):
     }
     
     try:
-        # TIMEOUT ADDED: 120 seconds to account for long generation queues
-        response = requests.post(url, json=payload, timeout=120)
+        # TIMEOUT INCREASED: 600 seconds (10 mins) to prevent timeouts on Pro model
+        response = requests.post(url, json=payload, timeout=600)
         
         if response.status_code == 429: return "RATE_LIMIT"
         if response.status_code != 200: return f"API_ERR_{response.status_code}"
@@ -238,7 +305,7 @@ def generate_audio_with_pauses(text, voice_name, api_key, model_name):
 
 # --- WORKER FUNCTION ---
 def process_chunk_task(task_data):
-    index, text, voice, key, model, output_dir, force_regen = task_data
+    index, text, voice, key, model, output_dir, force_regen, gender_cat = task_data
     
     filename = os.path.join(output_dir, f"chunk_{index:04d}.pcm")
     
@@ -264,7 +331,8 @@ def process_chunk_task(task_data):
                 continue
 
         if result:
-            is_healthy, reason = check_audio_health(result, text_len, max_silence_sec=QC_STRICT_SILENCE)
+            # PASS GENDER TO QC
+            is_healthy, reason = check_audio_health(result, text_len, target_gender=gender_cat, max_silence_sec=QC_STRICT_SILENCE)
             
             if is_healthy:
                 with open(filename, "wb") as f: f.write(result)
@@ -285,13 +353,10 @@ def smart_chunk_text(text, limit):
     current_chunk = ""
     lines = text.split('\n')
     
-    # Compile regex for Markdown headers (e.g. "# Chapter 1" or "## The End")
     header_pattern = re.compile(r'^#{1,6}\s+')
     
     for line in lines:
-        # Pre-clean formatting
         line = line.replace('**', '').replace('__', '') 
-        # Remove markdown header symbols so TTS doesn't say "Hashtag"
         line = header_pattern.sub('', line)
         
         if len(current_chunk) + len(line) < limit:
@@ -340,6 +405,7 @@ def main():
     else:
         print(f"[QC Profile] ZCR Threshold: {QC_ZCR_THRESHOLD} (Hiss Detection)")
         print(f"[QC Profile] RMS Dynamic Range: {QC_RMS_STD_THRESHOLD} (Monotone Detection)")
+        print(f"[QC Profile] Gender Sentry Active (Male > {int(QC_PITCH_MALE_MAX)}Hz / Female < {int(QC_PITCH_FEMALE_MIN)}Hz)")
 
     # --- PROJECT SETUP ---
     api_key = get_user_input("Enter Gemini API Key")
@@ -378,65 +444,96 @@ def main():
     m_choice = input("Choice [1]: ").strip()
     selected_model = MODELS.get(m_choice, MODELS["1"])
     
+    # Set worker config based on model type
     if "flash" in selected_model:
         max_workers = 4
         stagger_delay = 0.5 
     else:
         max_workers = 4 
-        stagger_delay = 15.0 
+        stagger_delay = 2.0  # REDUCED from 15.0 to 2.0 to show Status Bar faster
 
     print("\n--- Narrator Selection ---")
     narrator_gender = input("Narrator Gender (m/f): ").lower()
     voice_cat = "Male" if narrator_gender.startswith('m') else "Female"
     reader_voice = select_option(VOICES[voice_cat], f"{voice_cat} Voice")
     
-    # --- PROCESSING ---
-    print("\n[Normalizing Text...]")
+    # --- BUDGET OPTIMIZER LOOP ---
+    current_limit = RECOMMENDED_LIMITS.get(selected_model, 1500)
+    daily_limit = RPD_LIMITS.get(selected_model, 100)
     clean_text = raw_text.replace('“', '"').replace('”', '"')
-    chunks = smart_chunk_text(clean_text, CHUNK_LIMIT)
     
-    tasks = [(i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, not resume_mode) for i in range(len(chunks))]
+    while True:
+        print(f"\n[Configuration] Current Chunk Limit: {current_limit}")
+        limit_str = input(f"Enter New Limit (Higher=Riskier) or Press [ENTER] to calculate: ").strip()
+        
+        if limit_str.isdigit():
+            current_limit = int(limit_str)
+        
+        print("\n[Calculating Plan...]")
+        chunks = smart_chunk_text(clean_text, current_limit)
+        est_requests = len(chunks)
+        safety_margin = daily_limit - est_requests
+        
+        print(f"--- STATISTICS ---")
+        print(f"Total Chunks:   {est_requests}")
+        print(f"Daily Limit:    {daily_limit} (Model: {selected_model})")
+        print(f"Safety Margin:  {safety_margin} requests (Spare room for retries)")
+        
+        if safety_margin < 0:
+            print(f"[!] WARNING: This plan exceeds your daily limit by {abs(safety_margin)} requests.")
+        elif safety_margin < 5:
+            print(f"[!] CAUTION: Very tight margin ({safety_margin}). Retries may hit limit.")
+        else:
+            print(f"[OK] Plan looks safe.")
+            
+        choice = input("Accept plan and proceed? (y/n): ").lower().strip()
+        if choice == 'y':
+            break
+        print("    -> Adjusting limit...")
+
+    # ADD GENDER TO TASK TUPLE
+    tasks = [(i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, not resume_mode, voice_cat) for i in range(len(chunks))]
     results = [None] * len(chunks) 
     
+    # --- BATCH CONTROL ---
+    print(f"\n[Batch Control] You have {len(tasks)} tasks queued.")
+    batch_input = input("Press [ENTER] to run ALL, or enter a number (e.g. 50) to limit this run: ").strip()
+    if batch_input.isdigit():
+        limit_count = int(batch_input)
+        tasks = tasks[:limit_count]
+        print(f"    -> Run limited to first {limit_count} tasks. (Run again tomorrow to resume the rest)")
+
     # Need to import as_completed for the progress bar logic
     from concurrent.futures import as_completed
 
-    print(f"\n[Plan] Book split into {len(chunks)} chunks.")
     print(f"[Execution] Launching {max_workers} workers...")
     print("------------------------------------------------")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         
-        # 1. SUBMISSION PHASE
-        # We submit sequentially to respect the stagger delay (preventing instant rate limits)
         print("Initializing tasks...")
         for task in tasks:
             f = executor.submit(process_chunk_task, task)
             futures.append(f)
-            # Stagger submissions to avoid hitting API rate limits instantly
             time.sleep(0.1 if resume_mode else stagger_delay)
             
-        # 2. MONITORING PHASE
-        # We wrap as_completed so the bar updates as threads finish, regardless of order
         iterator = as_completed(futures)
         
         if TQDM_AVAILABLE:
-            iterator = tqdm(iterator, total=len(chunks), unit="chunk", desc="Processing", ncols=100)
+            iterator = tqdm(iterator, total=len(tasks), unit="chunk", desc="Processing", ncols=100)
             
         for future in iterator:
             idx, success, fname, msg = future.result()
-            results[idx] = (success, fname, msg) # Store result in correct index
+            if idx < len(results):
+                results[idx] = (success, fname, msg)
             
             status = "OK" if success else "FAIL"
             
-            # If using TQDM, use .write() to print above the bar without breaking it
-            # If valid/cached, we stay silent to keep UI clean, unless it failed.
             if TQDM_AVAILABLE:
                 if not success or (msg != "Cached/Skipped"):
                     tqdm.write(f"[Chunk {idx+1}] {status}: {msg}")
             else:
-                # Fallback for no TQDM
                 if msg != "Cached/Skipped":
                     safe_print(f"[Completed] Chunk {idx+1}: {status} ({msg})")
 
@@ -450,7 +547,11 @@ def main():
     print("\n--- Final Assembly Review ---")
     segment_files = []
     
-    for i in range(len(chunks)):
+    processed_count = len(tasks)
+    
+    for i in range(processed_count):
+        if not results[i]: continue 
+        
         while True:
             success, fname, msg = results[i]
             
@@ -482,12 +583,14 @@ def main():
                     new_text = edit_text_in_external_editor(chunks[i])
                     chunks[i] = new_text
                     print("    Regenerating...")
-                    t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True))
+                    # Pass voice_cat here as well
+                    t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True, voice_cat))
                     results[i] = (t_res[1], t_res[2], t_res[3])
 
                 elif choice == 'r':
                     print("    Regenerating...")
-                    t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True))
+                    # Pass voice_cat here as well
+                    t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True, voice_cat))
                     results[i] = (t_res[1], t_res[2], t_res[3])
             
             # CASE 2: SUCCESS
@@ -502,7 +605,6 @@ def main():
                     with open(fname, "rb") as f: current_raw = f.read()
                     preview_data = current_raw
                     
-                    # Contextual Preview
                     if segment_files:
                         try:
                             prev_file = segment_files[-1]
@@ -532,11 +634,11 @@ def main():
                         new_text = edit_text_in_external_editor(chunks[i])
                         chunks[i] = new_text
                         print("    Regenerating...")
-                        t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True))
+                        t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True, voice_cat))
                         results[i] = (t_res[1], t_res[2], t_res[3])
                     elif choice == 'r':
                         print("    Regenerating...")
-                        t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True))
+                        t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True, voice_cat))
                         results[i] = (t_res[1], t_res[2], t_res[3])
                 else:
                     segment_files.append(fname)
