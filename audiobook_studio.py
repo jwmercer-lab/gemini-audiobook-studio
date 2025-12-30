@@ -232,8 +232,8 @@ def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=10
     # 4. Loop Check
     duration_sec = total_samples / SAMPLE_RATE
     MIN_CHARS_PER_SEC = 12.0
-    # RELAXED THRESHOLD: Increased buffer from 5.0 to 10.0 to prevent false flags on slow reads
-    max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 10.0
+    # RELAXED THRESHOLD: Increased buffer from 5.0 to 15.0 to prevent false flags on slow reads
+    max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 15.0
 
     if duration_sec > max_allowed_duration:
         return False, f"Suspected Loop ({duration_sec:.1f}s > {max_allowed_duration:.1f}s limit)"
