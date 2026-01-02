@@ -522,7 +522,7 @@ def main():
     
     # --- BATCH CONTROL ---
     print(f"\n[Batch Control] You have {len(tasks)} tasks queued.")
-    batch_input = input("Press [ENTER] to run ALL, or enter a number (e.g. 50) to limit this run: ").strip()
+    batch_input = input("Press [ENTER] to run ALL, or enter a number (e.g. 40) to limit this run: ").strip()
     if batch_input.isdigit():
         limit_count = int(batch_input)
         tasks = tasks[:limit_count]
