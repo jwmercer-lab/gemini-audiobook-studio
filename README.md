@@ -115,7 +115,7 @@ Since you are running this primarily on Linux, here is the fast track:
 
    * Press ENTER to run the whole project.
 
-   *Or enter a number (e.g., `40`) to only run that many chunks. You can run the script again tomorrow to finish the rest.
+   * Or enter a number (e.g., `40`) to only run that many chunks. You can run the script again tomorrow to finish the rest.
 
 ### Director Mode Guide
 
