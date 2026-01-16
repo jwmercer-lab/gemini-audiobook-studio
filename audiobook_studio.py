@@ -81,7 +81,7 @@ QC_RMS_STD_THRESHOLD = 150   # Monotone Detection
 
 # Pitch Thresholds (Hz) - Used to detect gender swaps
 QC_PITCH_MALE_MAX = 175.0    # Above this? Likely female/child hallucination.
-QC_PITCH_FEMALE_MIN = 155.0  # Below this? Likely male hallucination.
+QC_PITCH_FEMALE_MIN = 135.0  # LOWERED to 135Hz (was 155Hz) to allow deeper female voices.
 
 # Thread-safe printing
 print_lock = threading.Lock()
@@ -204,7 +204,11 @@ def analyze_signal_metrics(audio_bytes, sample_rate=24000):
         safe_print(f"    [QC Error] Analysis failed: {e}")
         return 0.0, 1000.0, 1000.0
 
-def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=100, max_silence_sec=2.0):
+def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=100, max_silence_sec=2.0, extra_time=0.0):
+    """
+    Checks audio for artifacts, silence, hallucinations, and gender drift.
+    Includes 'extra_time' to account for intentional <break> tags.
+    """
     if not audio_bytes: return False, "Empty Data"
     total_samples = len(audio_bytes) // 2
     if total_samples == 0: return False, "Zero Samples"
@@ -232,8 +236,9 @@ def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=10
     # 4. Loop Check
     duration_sec = total_samples / SAMPLE_RATE
     MIN_CHARS_PER_SEC = 12.0
-    # RELAXED THRESHOLD: Increased buffer from 5.0 to 10.0 to prevent false flags on slow reads
-    max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 10.0
+    
+    # FIXED: Added extra_time buffer so intentional <break> pauses don't trigger "Suspected Loop"
+    max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 10.0 + extra_time
 
     if duration_sec > max_allowed_duration:
         return False, f"Suspected Loop ({duration_sec:.1f}s > {max_allowed_duration:.1f}s limit)"
@@ -325,12 +330,14 @@ def process_chunk_task(task_data):
             except:
                 pass
         
-        # NOTE: If the .txt file is missing (legacy runs), we treat it as INVALID and regenerate.
-        # This prevents misalignment if you changed settings between runs.
-        
         if is_valid_resume:
             if os.path.getsize(filename) > 0:
                 return (index, True, filename, "Cached/Skipped")
+
+    # CALCULATE INTENTIONAL SILENCE (Fix for Loop Detection False Positive)
+    # We sum up all the seconds requested in <break> tags
+    break_matches = re.findall(r'<break\s+time=[\'"]([\d\.]+)s[\'"]\s*/?>', text)
+    total_break_time = sum(float(t) for t in break_matches)
 
     max_retries = 3
     text_len = len(text)
@@ -349,8 +356,14 @@ def process_chunk_task(task_data):
                 continue
 
         if result:
-            # PASS GENDER TO QC
-            is_healthy, reason = check_audio_health(result, text_len, target_gender=gender_cat, max_silence_sec=QC_STRICT_SILENCE)
+            # PASS GENDER & EXTRA SILENCE TIME TO QC
+            is_healthy, reason = check_audio_health(
+                result, 
+                text_len, 
+                target_gender=gender_cat, 
+                max_silence_sec=QC_STRICT_SILENCE,
+                extra_time=total_break_time  # <--- PASS THE CALCULATED TIME
+            )
             
             if is_healthy:
                 # SAVE AUDIO
