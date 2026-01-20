@@ -6,18 +6,20 @@ A high-performance Python studio for generating long-form audiobooks using Googl
 
 * **Parallel Generation:** Uses threaded workers to maximize throughput while respecting API rate limits (handling 429s automatically).
 
-* **Project Management:** Automatically organizes output into `output/{ProjectName}/` folders, keeping your artifacts clean and separated.
+* **Simplified Structure:** Uses a flat `./chunks` directory for robustness, ensuring resume functionality works flawlessly across restarts.
 
 * **Smart Resume & Text Verification:** If you stop and restart a project, the script doesn't just check if a file exists—it checks if the *text* matches.
   * **Safe Limit Adjustments:** You can change the character limit or edit your source text between runs. The script reads the `.txt` verification card for each existing chunk. If the text has shifted due to a new character limit, it automatically invalidates and regenerates that specific chunk while keeping the valid ones.
+
+* **Tag-Aware SSML Support:** Insert `<break time="2.0s" />` directly into your text. The chunking engine is now "tag-aware," meaning it tokenizes SSML tags as atomic units so they are never accidentally cut in half during the splitting process.
+
+* **Native Pause Handling:** This studio sends SSML tags directly to Google's servers. A 3-minute chunk with 50 pauses still only counts as **1 API request**, maximizing your daily quota.
 
 * **Interactive Budget Calculator:** Before generating, the script enters a planning loop. It calculates exactly how many requests your project requires based on your character limit and compares it to your daily API quota.
     * **Safety Margin:** It explicitly tells you how many "spare" requests you have for retries.
     * **Tuning:** You can adjust the character limit up or down in real-time to find the sweet spot between audio quality (shorter chunks) and quota efficiency (longer chunks).
 
-* **Daily Batching:** specific feature for low-quota environments (like the 50 RPD limit on Pro). You can tell the script to process only a set number of chunks (e.g., "Run 20 chunks"). This allows you to spread a large project over several days without hitting quota errors.
-
-* **Pause Handling (Scene Breaks):** Supports custom silence tags. Insert `<break time="2.0s" />` directly into your text file to create dramatic pauses or scene transitions (replacing traditional `***` breaks).
+* **Daily Batching:** Process only a set number of chunks (e.g., "Run 20 chunks") per run. This allows you to spread large projects over multiple days to accommodate strict API quotas (like the 50 RPD limit on Gemini Pro).
 
 * **Smart Quality Control (QC):** Automatically flags audio defects using signal analysis:
   * **Dead Air:** Detects excessive silence.
@@ -26,7 +28,7 @@ A high-performance Python studio for generating long-form audiobooks using Googl
   * **Monotone Voices:** Analyzes dynamic range to flag "flat" or bored-sounding generations.
   * **Voice Drift Sentry:** Uses Harmonic Product Spectrum (HPS) pitch detection to ensure the narrator stays in character.
     * **Male Mode:** Flags if pitch drifts too high (>175Hz), indicating a female/child hallucination.
-    * **Female Mode:** Flags if pitch drifts too low (<155Hz), indicating a male hallucination.
+    * **Female Mode:** Flags if pitch drifts too low (<135Hz), indicating a male hallucination.
 
 * **Director Mode with Context:** An interactive review phase allowing you to audit, edit, and retry clips. Includes **Contextual Preview**, which plays the last 3 seconds of the *previous* chunk before the current one to ensure accent and tone continuity.
 
@@ -55,11 +57,12 @@ Since you are running this primarily on Linux, here is the fast track:
    sudo apt install python3 python3-pip ffmpeg git -y
    ```
 
-2. **Clone the Repository:**
-
+2. **Setup the Script:**
+   Create a folder for your project and place `audiobook_studio.py` inside it.
    ```bash
-   git clone https://github.com/jwmercer-lab/gemini-audiobook-studio.git
-   cd gemini-audiobook-studio
+   mkdir audiobook_project
+   cd audiobook_project
+   # (Move the python script here)
    ```
 
 3. **Install Python Libraries:**
@@ -92,16 +95,17 @@ Since you are running this primarily on Linux, here is the fast track:
 1. Run the script:
 
    ```bash
-   python3 audiobook_generator.py
+   python3 audiobook_studio.py
    ```
 
 2. Follow the prompts:
+   * **Input Text File:** Provide the path to your source `.txt` file.
 
-   * **Project Name:** Defines the output folder (e.g., output/`title`/).
-
-   * **Resume/Overwrite:** If chunks exist in that folder, you can Resume to save time.
-
-   * **Model & Voice:** Choose your settings.
+   * **Resume/Overwrite:** Decide whether to skip already generated and verified chunks.
+   
+   * **Model & Voice:** Choose your model and narrator profile.
+   
+   * **Budget Loop:** Adjust your chunk limits to fit your daily RPD (Requests Per Day) quota.
 
 3. **Budget Loop:** The script will show the default chunk limit (1500 for Flash, 2400 for Pro).
 
@@ -119,25 +123,17 @@ Since you are running this primarily on Linux, here is the fast track:
 
 ### Director Mode Guide
 
-If you enable Director Mode, the script will pause after generating all chunks to let you review them.
+When enabled, the script pauses after each segment to let you review the audio.
 
-**The Workflow:**
+* `[K]eep`: Clip is good.
 
-1. The script plays the generated clip (preceded by 3 seconds of the *previous* clip for context).
+* `[R]etry`: Regenerate the segment (useful if the API had a "bad day" with the delivery).
 
-2. You choose an action:
-
-   * `[K]eep`: The clip is good. Move to the next one.
-
-   * `[R]etry`: The clip sounded robotic or the accent slipped. The script immediately regenerates it.
-
-   * `[E]dit Text`: The model stumbled on a specific word. You can edit the text in a temp file, and the script will regenerate the audio using your new text.
-
-   * `[D]iscard`: Throw the whole project away (rarely used).
+* `[E]dit`: Open the text for that chunk in an editor, fix a pronunciation or tag, and regenerate.
 
 ## Tuning Quality Control
 
-If the script is being too strict (flagging good audio) or too lenient (missing robotic voices), you can adjust the thresholds in `audiobook_generator.py`:
+If the script is being too strict (flagging good audio) or too lenient (missing robotic voices), you can adjust the thresholds in `audiobook_studio.py`:
 
 * `QC_STRICT_SILENCE`: Max allowed silence in seconds (Default: 3.0s).
 
@@ -153,14 +149,15 @@ If the script is being too strict (flagging good audio) or too lenient (missing 
 ## Directory Structure
 
 ```plaintext
-output/
-└── MyAudiobook/
-    ├── chunks/
-    │   ├── chunk_0000.pcm
-    │   ├── chunk_0001.pcm
-    │   └── ...
-    ├── temp_master.wav
-    └── final_audiobook.mp3
+./
+├── audiobook_studio.py
+├── chunks/
+│   ├── chunk_0000.wav   <-- Playable Audio
+│   ├── chunk_0000.txt   <-- Verification Card
+│   ├── chunk_0001.wav
+│   └── ...
+├── temp_master.wav
+└── final_audiobook.mp3
 ```
 
 ## License

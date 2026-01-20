@@ -13,6 +13,7 @@ import math
 import concurrent.futures
 import threading
 import glob
+import shutil
 
 # --- DEPENDENCIES ---
 try:
@@ -78,12 +79,16 @@ SAMPLE_RATE = 24000
 QC_STRICT_SILENCE = 3.0
 QC_ZCR_THRESHOLD = 0.20      # Hiss Detection
 QC_RMS_STD_THRESHOLD = 150   # Monotone Detection
-
-# Pitch Thresholds (Hz) - Used to detect gender swaps
 QC_PITCH_MALE_MAX = 175.0    # Above this? Likely female/child hallucination.
-QC_PITCH_FEMALE_MIN = 135.0  # LOWERED to 135Hz (was 155Hz) to allow deeper female voices.
+QC_PITCH_FEMALE_MIN = 135.0  # LOWERED to allow deeper female voices.
 
-# Thread-safe printing
+# --- GLOBAL THREADING CONTROL ---
+# This is the critical fix for the "Machine Gun" effect.
+# Regardless of how many workers are running, they must pass through this single gate.
+API_LOCK = threading.Lock()
+LAST_REQUEST_TIME = 0
+MIN_REQUEST_INTERVAL = 2.0  # Minimum seconds between API hits
+
 print_lock = threading.Lock()
 
 def safe_print(msg):
@@ -133,82 +138,47 @@ def trim_silence(audio_bytes, threshold=80):
     except:
         return audio_bytes
 
-def generate_silence(duration_sec):
-    num_samples = int(SAMPLE_RATE * duration_sec)
-    return b'\x00\x00' * num_samples
-
 def estimate_fundamental_freq(audio_bytes, sample_rate=24000):
-    """
-    Estimates the fundamental frequency (pitch) using Harmonic Product Spectrum.
-    Useful for detecting if a male voice suddenly becomes female (pitch jump).
-    """
     if not NUMPY_AVAILABLE: return 0.0
-    
     try:
-        # Convert PCM to float array
         data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
         N = len(data)
-        if N < sample_rate * 0.5: return 0.0 # Too short to analyze accurately
-        
-        # Windowing to reduce spectral leakage
+        if N < sample_rate * 0.5: return 0.0
         window = np.hanning(N)
-        
-        # FFT
         spectrum = np.abs(np.fft.rfft(data * window))
         freqs = np.fft.rfftfreq(N, 1/sample_rate)
-        
-        # HPS (Harmonic Product Spectrum) - Downsample and multiply to find fundamental
         hps = np.copy(spectrum)
         for h in range(2, 4): 
             decimated = spectrum[::h]
             hps[:len(decimated)] *= decimated
-            
-        # Limit search to human voice range (50Hz - 400Hz)
         valid_idx = np.where((freqs > 60) & (freqs < 400))[0]
         if len(valid_idx) == 0: return 0.0
-        
         peak_idx = valid_idx[np.argmax(hps[valid_idx])]
         return freqs[peak_idx]
-        
     except Exception:
         return 0.0
 
 def analyze_signal_metrics(audio_bytes, sample_rate=24000):
     if not NUMPY_AVAILABLE: return 0.0, 100.0, 1000.0
-    
     try:
         audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
         if len(audio_data) == 0: return 0.0, 0.0, 0.0
-
-        # ZCR
         zero_crossings = np.sum(np.diff(np.signbit(audio_data).astype(int)) != 0)
         zcr = zero_crossings / len(audio_data)
-
-        # Dynamic Range
         chunk_size = int(sample_rate * 0.1)
         n_chunks = len(audio_data) // chunk_size
-        
-        if n_chunks < 2:
-            return zcr, 1000.0, 1000.0 
-        
+        if n_chunks < 2: return zcr, 1000.0, 1000.0 
         truncated_len = n_chunks * chunk_size
         reshaped = audio_data[:truncated_len].reshape(n_chunks, chunk_size)
         rms_per_window = np.sqrt(np.mean(reshaped.astype(np.float64)**2, axis=1))
-        
         avg_rms = np.mean(rms_per_window)
         rms_std_dev = np.std(rms_per_window)
-        
         return zcr, avg_rms, rms_std_dev
-        
     except Exception as e:
         safe_print(f"    [QC Error] Analysis failed: {e}")
         return 0.0, 1000.0, 1000.0
 
 def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=100, max_silence_sec=2.0, extra_time=0.0):
-    """
-    Checks audio for artifacts, silence, hallucinations, and gender drift.
-    Includes 'extra_time' to account for intentional <break> tags.
-    """
     if not audio_bytes: return False, "Empty Data"
     total_samples = len(audio_bytes) // 2
     if total_samples == 0: return False, "Zero Samples"
@@ -216,28 +186,17 @@ def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=10
     zcr, avg_rms, rms_std = analyze_signal_metrics(audio_bytes)
     pitch = estimate_fundamental_freq(audio_bytes)
     
-    # 1. Artifact Checks
-    if zcr > QC_ZCR_THRESHOLD: 
-        return False, f"Metallic/Hissy Artifact (ZCR: {zcr:.2f})"
-    if avg_rms < 50: 
-        return False, f"Low Volume (RMS: {int(avg_rms)})"
-    
-    # 2. Gender/Pitch Consistency Check
+    if zcr > QC_ZCR_THRESHOLD: return False, f"Metallic/Hissy Artifact (ZCR: {zcr:.2f})"
+    if avg_rms < 50: return False, f"Low Volume (RMS: {int(avg_rms)})"
     if pitch > 0:
         if target_gender == "Male" and pitch > QC_PITCH_MALE_MAX:
-            return False, f"Voice Drift Detected (Pitch High: {int(pitch)}Hz > {int(QC_PITCH_MALE_MAX)}Hz)"
+            return False, f"Voice Drift Detected (Pitch High: {int(pitch)}Hz)"
         if target_gender == "Female" and pitch < QC_PITCH_FEMALE_MIN:
-            return False, f"Voice Drift Detected (Pitch Low: {int(pitch)}Hz < {int(QC_PITCH_FEMALE_MIN)}Hz)"
+            return False, f"Voice Drift Detected (Pitch Low: {int(pitch)}Hz)"
+    if rms_std < QC_RMS_STD_THRESHOLD: return False, f"Monotone/Flat Dynamics (StdDev: {int(rms_std)})"
 
-    # 3. Monotone Check
-    if rms_std < QC_RMS_STD_THRESHOLD:
-        return False, f"Monotone/Flat Dynamics (StdDev: {int(rms_std)})"
-
-    # 4. Loop Check
     duration_sec = total_samples / SAMPLE_RATE
     MIN_CHARS_PER_SEC = 12.0
-    
-    # FIXED: Added extra_time buffer so intentional <break> pauses don't trigger "Suspected Loop"
     max_allowed_duration = (text_len / MIN_CHARS_PER_SEC) + 10.0 + extra_time
 
     if duration_sec > max_allowed_duration:
@@ -246,7 +205,14 @@ def check_audio_health(audio_bytes, text_len, target_gender="Male", threshold=10
     return True, "OK"
 
 def generate_audio_raw(text, voice_name, api_key, model_name):
+    """
+    Sends a request to Gemini API.
+    CRITICAL FIX: Wraps the network call in a Global Lock to prevent Rate Limits.
+    """
     if not text.strip(): return b""
+    
+    global LAST_REQUEST_TIME
+    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     
     safety_settings = [
@@ -267,75 +233,70 @@ def generate_audio_raw(text, voice_name, api_key, model_name):
         }
     }
     
-    try:
-        # TIMEOUT INCREASED: 600 seconds (10 mins) to prevent timeouts on Pro model
-        response = requests.post(url, json=payload, timeout=600)
+    # --- THROTTLING LOGIC ---
+    # Even if 10 threads call this function, they must wait in single-file line here.
+    with API_LOCK:
+        elapsed = time.time() - LAST_REQUEST_TIME
+        if elapsed < MIN_REQUEST_INTERVAL:
+            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
         
-        if response.status_code == 429: return "RATE_LIMIT"
-        if response.status_code != 200: return f"API_ERR_{response.status_code}"
+        LAST_REQUEST_TIME = time.time()
+        
+        # The request logic is inside the lock to ensure we don't start the timer 
+        # until the previous request has actually fired.
+        try:
+            response = requests.post(url, json=payload, timeout=600)
             
-        data = response.json()
-        if "candidates" not in data: return "NO_CANDIDATES"
-        
-        audio_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-        return base64.b64decode(audio_b64)
+            if response.status_code == 429: return "RATE_LIMIT"
+            if response.status_code != 200: return f"API_ERR_{response.status_code}"
+                
+            data = response.json()
+            if "candidates" not in data: return "NO_CANDIDATES"
+            
+            audio_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            return base64.b64decode(audio_b64)
 
-    except requests.exceptions.Timeout:
-        return "EXCEPTION_TIMEOUT"
-    except Exception as e:
-        return f"EXCEPTION_{str(e)}"
+        except requests.exceptions.Timeout:
+            return "EXCEPTION_TIMEOUT"
+        except Exception as e:
+            return f"EXCEPTION_{str(e)}"
 
-def generate_audio_with_pauses(text, voice_name, api_key, model_name):
-    pattern = r'<break\s+time=[\'"]([\d\.]+)s[\'"]\s*/?>'
-    parts = re.split(pattern, text)
-    combined_audio = bytearray()
-    
-    i = 0
-    while i < len(parts):
-        segment_text = parts[i]
-        
-        if segment_text.strip():
-            res = generate_audio_raw(segment_text, voice_name, api_key, model_name)
-            if isinstance(res, str): return res
-            if res: combined_audio.extend(trim_silence(res))
-        
-        if i + 1 < len(parts):
-            try:
-                duration = float(parts[i+1])
-                combined_audio.extend(generate_silence(duration))
-            except ValueError: pass
-            i += 1
-        i += 1
-        
-    return bytes(combined_audio)
+def generate_audio_chunk(text, voice_name, api_key, model_name):
+    """
+    Directly sends text (with SSML tags) to the API.
+    Native Mode: Trust the API to handle the tags.
+    """
+    res = generate_audio_raw(text, voice_name, api_key, model_name)
+    if isinstance(res, str): return res # Propagate error
+    if res: return trim_silence(res)
+    return b""
 
 # --- WORKER FUNCTION ---
 def process_chunk_task(task_data):
     index, text, voice, key, model, output_dir, force_regen, gender_cat = task_data
     
-    filename = os.path.join(output_dir, f"chunk_{index:04d}.pcm")
+    # Unified naming: .wav for friendly playback, %03d to catch standard indexes
+    # Using 4 digits for future-proofing, but glob handles the match.
+    filename = os.path.join(output_dir, f"chunk_{index:04d}.wav")
     text_filename = os.path.join(output_dir, f"chunk_{index:04d}.txt")
     
-    # RESUME CHECK
-    # Smart Resume: We verify that the chunk exists AND the text inside matches exactly.
+    # Smart Resume Check
     if not force_regen and os.path.exists(filename):
         is_valid_resume = False
-        
         if os.path.exists(text_filename):
             try:
                 with open(text_filename, "r", encoding="utf-8") as f:
                     cached_text = f.read()
                 if cached_text == text:
                     is_valid_resume = True
-            except:
-                pass
+            except: pass
         
         if is_valid_resume:
             if os.path.getsize(filename) > 0:
                 return (index, True, filename, "Cached/Skipped")
 
-    # CALCULATE INTENTIONAL SILENCE (Fix for Loop Detection False Positive)
-    # We sum up all the seconds requested in <break> tags
+    # Calculate intentional silence for QC only
+    # (We no longer split by these tags, but we still need to know how long the audio *should* be)
     break_matches = re.findall(r'<break\s+time=[\'"]([\d\.]+)s[\'"]\s*/?>', text)
     total_break_time = sum(float(t) for t in break_matches)
 
@@ -343,11 +304,11 @@ def process_chunk_task(task_data):
     text_len = len(text)
     
     for attempt in range(max_retries):
-        result = generate_audio_with_pauses(text, voice, key, model)
+        result = generate_audio_chunk(text, voice, key, model)
         
         if isinstance(result, str):
             if "RATE_LIMIT" in result:
-                safe_print(f"  [Worker {index+1}] Rate Limit Hit. Sleeping...")
+                safe_print(f"  [Worker {index+1}] Rate Limit Hit (429). Retrying...")
                 time.sleep(10 + (attempt * 5))
                 continue 
             else:
@@ -356,52 +317,97 @@ def process_chunk_task(task_data):
                 continue
 
         if result:
-            # PASS GENDER & EXTRA SILENCE TIME TO QC
             is_healthy, reason = check_audio_health(
                 result, 
                 text_len, 
                 target_gender=gender_cat, 
                 max_silence_sec=QC_STRICT_SILENCE,
-                extra_time=total_break_time  # <--- PASS THE CALCULATED TIME
+                extra_time=total_break_time
             )
             
             if is_healthy:
-                # SAVE AUDIO
-                with open(filename, "wb") as f: f.write(result)
-                # SAVE TEXT VERIFICATION CARD
+                # Save as valid WAV for playback and resume compatibility
+                with wave.open(filename, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(SAMPLE_RATE)
+                    w.writeframes(result)
                 try:
                     with open(text_filename, "w", encoding="utf-8") as f: f.write(text)
                 except: pass
                 
                 return (index, True, filename, "OK")
             else:
-                safe_print(f"  [Worker {index+1}] QC Fail: {reason}. Retrying ({attempt+1}/{max_retries})...")
+                safe_print(f"  [Worker {index+1}] QC Fail: {reason}. Retrying...")
                 time.sleep(2)
                 continue
         
-    failed_filename = os.path.join(output_dir, f"chunk_{index:04d}_FAILED.pcm")
+    failed_filename = os.path.join(output_dir, f"chunk_{index:04d}_FAILED.wav")
     if result and isinstance(result, bytes):
-        with open(failed_filename, "wb") as f: f.write(result)
+        with wave.open(failed_filename, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(SAMPLE_RATE)
+            w.writeframes(result)
     
     return (index, False, failed_filename, "Max Retries Exceeded")
 
 def smart_chunk_text(text, limit):
+    """
+    Tokenizes text by SSML tags to ensure we NEVER split inside a tag.
+    Then accumulates tokens into chunks respecting the limit.
+    """
+    # Clean Markdown
+    text = text.replace('**', '').replace('__', '')
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+
+    # 1. Split by tags (keeping tags).
+    # This regex matches <...> sequences.
+    tokens = re.split(r'(<[^>]+>)', text)
+    
     chunks = []
-    current_chunk = ""
-    lines = text.split('\n')
+    current_chunk = []
+    current_len = 0
     
-    header_pattern = re.compile(r'^#{1,6}\s+')
-    
-    for line in lines:
-        line = line.replace('**', '').replace('__', '') 
-        line = header_pattern.sub('', line)
+    for token in tokens:
+        if not token: continue
         
-        if len(current_chunk) + len(line) < limit:
-            current_chunk += "\n" + line
+        token_len = len(token)
+        
+        # Case A: Token is a Tag (Atomic, must not be split)
+        if token.startswith('<') and token.endswith('>'):
+            if current_len + token_len > limit and current_chunk:
+                chunks.append("".join(current_chunk))
+                current_chunk = []
+                current_len = 0
+            current_chunk.append(token)
+            current_len += token_len
+            
+        # Case B: Token is Text (Can be split if needed)
         else:
-            if current_chunk: chunks.append(current_chunk)
-            current_chunk = line
-    if current_chunk: chunks.append(current_chunk)
+            if current_len + token_len <= limit:
+                current_chunk.append(token)
+                current_len += token_len
+            else:
+                # Text is too big for the remaining space.
+                # Split by natural boundaries: Newlines first, then sentence endings.
+                # This regex splits by newline OR sentence ending (keeping the delimiter attached or separate).
+                # (?<=[.?!]) matches position after punctuation.
+                
+                # Split into smaller pieces
+                sub_parts = re.split(r'(\n|(?<=[.?!])\s+)', token)
+                
+                for part in sub_parts:
+                    if not part: continue
+                    part_len = len(part)
+                    
+                    if current_len + part_len > limit and current_chunk:
+                        chunks.append("".join(current_chunk))
+                        current_chunk = []
+                        current_len = 0
+                    
+                    current_chunk.append(part)
+                    current_len += part_len
+
+    if current_chunk:
+        chunks.append("".join(current_chunk))
+        
     return chunks
 
 def edit_text_in_external_editor(text):
@@ -440,35 +446,34 @@ def main():
     if not NUMPY_AVAILABLE:
         print("[!] Numpy missing. Quality Control will be limited.")
     else:
-        print(f"[QC Profile] ZCR Threshold: {QC_ZCR_THRESHOLD} (Hiss Detection)")
-        print(f"[QC Profile] RMS Dynamic Range: {QC_RMS_STD_THRESHOLD} (Monotone Detection)")
-        print(f"[QC Profile] Gender Sentry Active (Male > {int(QC_PITCH_MALE_MAX)}Hz / Female < {int(QC_PITCH_FEMALE_MIN)}Hz)")
+        print(f"[QC Profile] ZCR Threshold: {QC_ZCR_THRESHOLD}")
+        print(f"[QC Profile] Gender Sentry: Active")
 
     # --- PROJECT SETUP ---
-    api_key = get_user_input("Enter Gemini API Key")
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        api_key = get_user_input("Enter Gemini API Key")
     
-    project_name = get_user_input("Project Name (Folder)", "MyAudiobook")
-    base_dir = os.path.join("output", project_name)
-    chunks_dir = os.path.join(base_dir, "chunks")
-    
+    # Default to root 'chunks' folder to be friendly to previous script users
+    chunks_dir = "chunks"
     os.makedirs(chunks_dir, exist_ok=True)
     
     # Resume Check
-    existing_chunks = glob.glob(os.path.join(chunks_dir, "chunk_*.pcm"))
+    # Look for both WAV (Parallel Script) and PCM (Studio Script)
+    existing_chunks = glob.glob(os.path.join(chunks_dir, "chunk_*.wav")) + glob.glob(os.path.join(chunks_dir, "chunk_*.pcm"))
     resume_mode = False
     
     if existing_chunks:
-        print(f"\n[!] Found {len(existing_chunks)} existing chunks in '{chunks_dir}'.")
-        print("    NOTE: Resume now enforces text verification. Legacy files without .txt verification cards will be regenerated.")
+        print(f"\n[!] Found {len(existing_chunks)} existing chunks.")
         choice = input("    [R]esume (Skip verified) | [O]verwrite (Delete all): ").lower().strip()
         if choice == 'o':
-            print("    Deleting old chunks...")
+            # Delete both audio and text files
             for f in existing_chunks: os.remove(f)
+            for f in glob.glob(os.path.join(chunks_dir, "chunk_*.txt")): os.remove(f)
         else:
             resume_mode = True
-            print("    Resume mode enabled.")
 
-    input_file = get_user_input("Input Text File", "el_standard.txt")
+    input_file = get_user_input("Input Text File", "ln1_col1_hybrid.txt")
     raw_text = ""
     try:
         with open(input_file, "r", encoding="utf-8") as f: raw_text = f.read()
@@ -482,14 +487,9 @@ def main():
     m_choice = input("Choice [1]: ").strip()
     selected_model = MODELS.get(m_choice, MODELS["1"])
     
-    # Set worker config based on model type
-    if "flash" in selected_model:
-        max_workers = 4
-        stagger_delay = 0.5 
-    else:
-        max_workers = 4 
-        stagger_delay = 15.0  # REVERTED to 15.0 for Stability (Rate Limits count as requests)
-
+    # WORKER CONFIG
+    max_workers = 4
+    
     print("\n--- Narrator Selection ---")
     narrator_gender = input("Narrator Gender (m/f): ").lower()
     voice_cat = "Male" if narrator_gender.startswith('m') else "Female"
@@ -514,50 +514,37 @@ def main():
         
         print(f"--- STATISTICS ---")
         print(f"Total Chunks:   {est_requests}")
-        print(f"Daily Limit:    {daily_limit} (Model: {selected_model})")
-        print(f"Safety Margin:  {safety_margin} requests (Spare room for retries)")
+        print(f"Daily Limit:    {daily_limit}")
+        print(f"Safety Margin:  {safety_margin} requests")
         
-        if safety_margin < 0:
-            print(f"[!] WARNING: This plan exceeds your daily limit by {abs(safety_margin)} requests.")
-        elif safety_margin < 5:
-            print(f"[!] CAUTION: Very tight margin ({safety_margin}). Retries may hit limit.")
-        else:
-            print(f"[OK] Plan looks safe.")
-            
         choice = input("Accept plan and proceed? (y/n): ").lower().strip()
         if choice == 'y':
             break
-        print("    -> Adjusting limit...")
 
-    # ADD GENDER TO TASK TUPLE
+    # Tasks definition (Pause Mode removed)
     tasks = [(i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, not resume_mode, voice_cat) for i in range(len(chunks))]
     results = [None] * len(chunks) 
     
     # --- BATCH CONTROL ---
     print(f"\n[Batch Control] You have {len(tasks)} tasks queued.")
-    batch_input = input("Press [ENTER] to run ALL, or enter a number (e.g. 40) to limit this run: ").strip()
+    batch_input = input("Press [ENTER] to run ALL, or enter a number to limit: ").strip()
     if batch_input.isdigit():
         limit_count = int(batch_input)
         tasks = tasks[:limit_count]
-        print(f"    -> Run limited to first {limit_count} tasks. (Run again tomorrow to resume the rest)")
 
-    # Need to import as_completed for the progress bar logic
     from concurrent.futures import as_completed
 
-    print(f"[Execution] Launching {max_workers} workers...")
+    print(f"[Execution] Launching {max_workers} workers (Throttled Mode)...")
     print("------------------------------------------------")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
-        
-        print("Initializing tasks...")
         for task in tasks:
             f = executor.submit(process_chunk_task, task)
             futures.append(f)
-            time.sleep(0.1 if resume_mode else stagger_delay)
+            time.sleep(0.1) 
             
         iterator = as_completed(futures)
-        
         if TQDM_AVAILABLE:
             iterator = tqdm(iterator, total=len(tasks), unit="chunk", desc="Processing", ncols=100)
             
@@ -568,114 +555,53 @@ def main():
             
             status = "OK" if success else "FAIL"
             
-            if TQDM_AVAILABLE:
-                if not success or (msg != "Cached/Skipped"):
-                    tqdm.write(f"[Chunk {idx+1}] {status}: {msg}")
-            else:
+            if not TQDM_AVAILABLE:
                 if msg != "Cached/Skipped":
-                    safe_print(f"[Completed] Chunk {idx+1}: {status} ({msg})")
+                    safe_print(f"[Chunk {idx+1}] {status}: {msg}")
 
     # --- REVIEW PHASE ---
     director_mode = input("\nEnable Director Review (Check/Retry files)? (y/n) [y]: ").lower() != 'n'
-    review_all = False
-    
-    if director_mode and resume_mode:
-        review_all = input("    Review cached/skipped files too? (y/n) [n]: ").lower() == 'y'
-    
-    print("\n--- Final Assembly Review ---")
     segment_files = []
     
-    processed_count = len(tasks)
-    
-    for i in range(processed_count):
+    for i in range(len(tasks)):
         if not results[i]: continue 
         
         while True:
             success, fname, msg = results[i]
             
-            # CASE 1: FAILED
             if not success:
                 print(f"\n[!] Chunk {i+1} FAILED: {msg}")
                 has_file = fname and os.path.exists(fname)
-                
-                print("Options: [R]etry Sync | [E]dit Text | [D]iscard", end="")
-                if has_file: print(" | [L]isten Failed", end="")
+                print("Options: [R]etry | [E]dit Text | [D]iscard", end="")
+                if has_file: print(" | [L]isten", end="")
                 print("")
                 
                 choice = input("Select: ").lower().strip()
-                if not choice: choice = 'r'
-
-                if choice == 'd':
-                    print("    Discarding.")
-                    break 
-                
+                if choice == 'd': break 
                 elif choice == 'l' and has_file:
-                    with open(fname, "rb") as f: raw = f.read()
-                    with wave.open("preview.wav", "wb") as w:
-                        w.setnchannels(1); w.setsampwidth(2); w.setframerate(SAMPLE_RATE); w.writeframes(raw)
-                    play_audio_file("preview.wav")
-                    if input("    Force Keep? (y/n): ").lower() == 'y':
-                        results[i] = (True, fname, "Manual Override") 
-                
-                elif choice == 'e':
-                    new_text = edit_text_in_external_editor(chunks[i])
-                    chunks[i] = new_text
+                    play_audio_file(fname)
+                elif choice in ('r', 'e'):
+                    if choice == 'e':
+                        chunks[i] = edit_text_in_external_editor(chunks[i])
                     print("    Regenerating...")
-                    # Pass voice_cat here as well
-                    t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True, voice_cat))
-                    results[i] = (t_res[1], t_res[2], t_res[3])
-
-                elif choice == 'r':
-                    print("    Regenerating...")
-                    # Pass voice_cat here as well
                     t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True, voice_cat))
                     results[i] = (t_res[1], t_res[2], t_res[3])
             
-            # CASE 2: SUCCESS
             else:
                 if director_mode:
-                    if "Cached" in msg and not review_all:
+                    if "Cached" in msg:
                         segment_files.append(fname)
                         break
 
                     print(f"\nReviewing Chunk {i+1} ({msg})...")
+                    play_audio_file(fname)
                     
-                    with open(fname, "rb") as f: current_raw = f.read()
-                    preview_data = current_raw
-                    
-                    if segment_files:
-                        try:
-                            prev_file = segment_files[-1]
-                            with open(prev_file, "rb") as f: prev_raw = f.read()
-                            
-                            bytes_to_take = 3 * 24000 * 2
-                            context = prev_raw[-bytes_to_take:] if len(prev_raw) > bytes_to_take else prev_raw
-                            spacer = b'\x00\x00' * 12000 # 0.5s silence
-                            preview_data = context + spacer + current_raw
-                            print("    (Playing with 3s context from previous clip...)")
-                        except: pass
-
-                    with wave.open("preview.wav", "wb") as w:
-                        w.setnchannels(1); w.setsampwidth(2); w.setframerate(SAMPLE_RATE); w.writeframes(preview_data)
-                    play_audio_file("preview.wav")
-                    
-                    choice = input("    [K]eep | [R]etry | [E]dit Text | [D]iscard: ").lower().strip()
-                    if not choice: choice = 'k'
-                    
-                    if choice == 'k':
-                        segment_files.append(fname)
-                        break 
-                    elif choice == 'd':
-                        print("    Discarding.")
-                        break 
-                    elif choice == 'e':
-                        new_text = edit_text_in_external_editor(chunks[i])
-                        chunks[i] = new_text
-                        print("    Regenerating...")
-                        t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True, voice_cat))
-                        results[i] = (t_res[1], t_res[2], t_res[3])
-                    elif choice == 'r':
-                        print("    Regenerating...")
+                    choice = input("    [K]eep | [R]etry | [E]dit: ").lower().strip()
+                    if not choice or choice == 'k':
+                        segment_files.append(fname); break 
+                    elif choice in ('r', 'e'):
+                        if choice == 'e':
+                            chunks[i] = edit_text_in_external_editor(chunks[i])
                         t_res = process_chunk_task((i, chunks[i], reader_voice, api_key, selected_model, chunks_dir, True, voice_cat))
                         results[i] = (t_res[1], t_res[2], t_res[3])
                 else:
@@ -685,15 +611,15 @@ def main():
     # --- STITCHING PHASE ---
     if segment_files:
         print(f"\nStitching {len(segment_files)} segments...")
-        temp = os.path.join(base_dir, "temp_master.wav")
+        temp = "temp_master.wav"
         with wave.open(temp, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(SAMPLE_RATE)
             for seg in segment_files:
                 try:
-                    with open(seg, "rb") as f: w.writeframes(f.read())
+                    with wave.open(seg, "rb") as f: w.writeframes(f.readframes(f.getnframes()))
                 except: pass
         
-        output_filename = os.path.join(base_dir, "final_audiobook")
+        output_filename = "final_audiobook"
         final = f"{output_filename}.mp3" if PYDUB_AVAILABLE else f"{output_filename}.wav"
         
         if PYDUB_AVAILABLE:
