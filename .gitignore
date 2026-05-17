@@ -1,21 +1,19 @@
-# Python artifacts
-__pycache__/
-*.py[cod]
-*$py.class
+# **Python artifacts**
 
-# Distribution / Install
-venv/
-env/
-.env
+**pycache**/ \*.py\[cod\] \*$py.class
 
-# Project Output (IMPORTANT)
-output/
-*.pcm
-*.wav
-*.mp3
+# **Distribution / Install**
 
-# Editor temp files
-studio_quick_edit.txt
-.vscode/
-.idea/
-*.swp
+venv/ env/ .env
+
+# **Project Output (IMPORTANT)**
+
+output/ \*.pcm \*.wav \*.mp3
+
+# **TTS Engine Cache**
+
+.tts\_cache\_\*/
+
+# **Editor temp files**
+
+studio\_quick\_edit.txt .vscode/ .idea/ \*.swp
