@@ -20,8 +20,10 @@ director_mode = input("Enable Director Mode to review chunks as they generate? (
 model_input = input("Select model (3.1-flash / 2.5-pro) [default: 3.1-flash]: ").strip().lower()
 if '2.5' in model_input or 'pro' in model_input:
     model_name = "gemini-2.5-pro-tts"
+    char_limit = 3000
 else:
     model_name = "gemini-3.1-flash-tts-preview"
+    char_limit = 2000
 
 if mode == 'm':
     spk1_name = input("Enter Speaker 1 Name (as written in text, e.g., Sarah): ").strip()
@@ -69,11 +71,11 @@ for index, chunk in enumerate(chunks, 1):
     char_count = len(combined_contents)
     prepared_chunks.append((index, combined_contents, char_count))
     
-    if char_count > 3000:
+    if char_count > char_limit:
         oversized.append((index, char_count, chunk))
 
 if oversized:
-    print("\n[!] Pre-Flight Warning: Oversized chunks detected.")
+    print(f"\n[!] Pre-Flight Warning: Chunks exceeding the {char_limit}-character limit detected.")
     for idx, count, _ in oversized:
         print(f"    - Chunk {idx}: {count} characters")
         
