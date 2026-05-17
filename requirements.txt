@@ -1,4 +1,1 @@
-requests
-pydub
-numpy
-tqdm
+﻿requests
