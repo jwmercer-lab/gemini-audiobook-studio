@@ -1,4 +1,4 @@
-# **Gemini TTS Studio**
+# **Gemini Audiobook Studio**
 
 A lightweight, high-precision Python script for narrating stories and scripts using Google's Gemini TTS models. This tool handles hard scene breaks, multi-speaker dialogues, pre-flight payload validation, and rate limit survival to ensure you don't waste API quota on broken requests.
 
@@ -24,7 +24,7 @@ A lightweight, high-precision Python script for narrating stories and scripts us
 ## **Setup & Installation**
 
 1. **Setup the Directory:**  
-   Create a folder for your project and place tts.py and your text files inside it.  
+   Create a folder for your project and place audiobook\_studio.py and your text files inside it.  
 2. **Install Python Libraries:**  
    The script relies almost entirely on standard library modules. Install the single external dependency:  
    pip install \-r requirements.txt
@@ -54,7 +54,7 @@ Sarah: Sam yelled, swiping her volume down.
 
 Run the script from your terminal:
 
-python tts.py
+python audiobook\_studio.py
 
 The script will prompt you through the setup:
 
