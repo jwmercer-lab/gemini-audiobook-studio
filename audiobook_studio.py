@@ -17,11 +17,11 @@ mode = input("Single voice or Multi-speaker? (s/m): ").strip().lower()
 
 director_mode = input("Enable Director Mode to review chunks as they generate? (y/n): ").strip().lower() == 'y'
 
-model_input = input("Select model (2.5-pro / 3.1-flash) [default: 2.5-pro]: ").strip().lower()
-if '3.1' in model_input or 'flash' in model_input:
-    model_name = "gemini-3.1-flash-tts-preview"
-else:
+model_input = input("Select model (3.1-flash / 2.5-pro) [default: 3.1-flash]: ").strip().lower()
+if '2.5' in model_input or 'pro' in model_input:
     model_name = "gemini-2.5-pro-tts"
+else:
+    model_name = "gemini-3.1-flash-tts-preview"
 
 if mode == 'm':
     spk1_name = input("Enter Speaker 1 Name (as written in text, e.g., Sarah): ").strip()
@@ -127,6 +127,23 @@ for index, combined_contents, char_count in prepared_chunks:
 
         # Dynamic Speech Config
         if mode == 'm':
+            speech_config = {
+                "languageCode": "en-US",
+                "multiSpeakerVoiceConfig": {
+                    "speakerVoiceConfigs": [
+                        {"speaker": spk1_name, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": spk1_voice}}},
+                        {"speaker": spk2_name, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": spk2_voice}}}
+                    ]
+                }
+            }
+        else:
+            speech_config = {
+                "languageCode": "en-US",
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {"voiceName": voice_choice}
+                }
+            }
+
         payload = {
             "contents": [{"role": "user", "parts": [{"text": combined_contents}]}],
             "generationConfig": {
