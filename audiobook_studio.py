@@ -230,8 +230,8 @@ with wave.open(output_filename, "wb") as master_wf:
 print(f"Execution complete. Audio saved as: {output_filename}")
 
 # --- Cleanup ---
-cleanup = input(f"\nDo you want to delete the temporary cache folder ({cache_dir})? (y/n): ").strip().lower()
-if cleanup == 'y':
+cleanup = input(f"\nKeep the temporary cache folder ({cache_dir}) for future edits? [Y/n]: ").strip().lower()
+if cleanup == 'n':
     shutil.rmtree(cache_dir)
     print("Cache wiped.")
 else:
