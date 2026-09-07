@@ -4,44 +4,49 @@ A lightweight, high-precision Python script for narrating stories and scripts us
 
 ## **Features**
 
-* **Multi-Speaker Support:** Natively supports two-character dialogue. Map inline tags (e.g., Sarah: and Sam:) to distinct Gemini voices for dynamic scene reads.  
-* **Smart Pre-Flight Validation:** Splits your text along natural \*\*\* scene breaks. Before making a single API call, the script measures every chunk against the model's hard character limit (2000 for 3.1-flash, 3000 for 2.5-pro) and flags oversized blocks so you can cut them manually.  
-* **Smart Caching & Resume:** The script saves individual .wav chunks and .txt verification cards to a hidden local directory (e.g., .tts\_cache\_...). If you hit a hard failure, run the script again. It verifies the text logic and instantly skips over already-generated chunks.  
-  * *Manual Editing:* If you get a bad read or dead air, unhide your system folders (Mac: Cmd \+ Shift \+ Period, Windows: View \> Hidden items), delete the bad .wav chunk, and rerun the script. It will re-roll that single take and stitch the master file.  
-* **Rate Limit Survival:** Automatically catches 429 Too Many Requests errors from the API, initiates a cooldown, and retries without dropping the execution or losing data.  
-* **Director Mode:** Review chunks as they generate. The script will pause, play the audio, and let you choose to keep the take or discard and re-roll it on the spot to catch hallucinated accents or flat reads.  
-* **Variable Model Selection:** Toggle between gemini-3.1-flash-tts-preview (default) and gemini-2.5-pro-tts.  
-* **Atmospheric Prompts:** Inject a style prompt at runtime to dictate the baseline mood of the read.  
-* **In-Memory Stitching:** No third-party audio dependencies like FFmpeg. The script stitches the local cache files using native Python modules and builds a single, continuous .wav file at the end.
+* **Multi-Speaker Support:** Natively supports two-character dialogue by mapping inline tags (e.g., Sarah: and Sam:) to distinct Gemini voices.
+* **In-Flight System Editor:** Automatically launches your desktop text editor (xed, gedit, mousepad, kate on Linux; TextEdit on macOS; Notepad on Windows) whenever an edit is needed.
+* **Dynamic Inline Splitting:** Adding `***` inside the editor splits an oversized chunk on the fly, updates the source text on disk, and recalculates the queue automatically.
+* **Safety Filter Interception:** Catches tripped content filters mid-generation and opens an editor buffer so you can adjust phrasing and retry without aborting the session.
+* **Dual-Match Caching:** Saves generated `.wav` files alongside both modified `.txt` and original `.orig.txt` records, using newline normalization to prevent redundant API calls.
+* **Director Mode:** Audition chunks as they finish generating with immediate options to keep, re-roll, or open the text editor for real-time rewrites.
+* **Dual Master Export:** Automatically stitches the full 24kHz master audio file and outputs an updated manuscript (`_revised.txt`) reflecting all runtime edits.
+* **Zero Audio Dependencies:** Concatenates raw audio frames using Python's native `wave` library with no FFmpeg or third-party audio packages required.
 
 ## **Prerequisites**
 
 1. **Python 3.10+**: Requires a modern Python environment.  
 2. **Google Gemini API Key**: A valid REST API key from Google AI Studio.
+3. **Supported Text Editor**:
+   * **Linux:** Uses `xed`, `gedit`, `mousepad`, `kate`, or falls back to `$EDITOR` / `nano`.
+   * **macOS:** Uses `TextEdit`.
+   * **Windows:** Uses `Notepad`.
 
-*Note: FFmpeg, Numpy, and Pydub are no longer required.*
+*Note: FFmpeg, Numpy, and Pydub are not required.*
 
 ## **Setup & Installation**
 
 1. **Setup the Directory:**  
-   Create a folder for your project and place audiobook\_studio.py and your text files inside it.  
+   Create a folder for your project and place `audiobook_studio.py` and your text files inside it.  
 2. **Install Python Libraries:**  
    The script relies almost entirely on standard library modules. Install the single external dependency:  
-   pip install \-r requirements.txt
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ## **Text Formatting Rules**
 
-**1\. Scene Breaks**
+**1. Scene Breaks**
 
 Break your text into smaller chunks using three asterisks on their own line. Remember to stay under the character limit for your chosen model (2000 for Flash, 3000 for Pro).
 
 The heavy door swung shut.
 
-\*\*\*
+***
 
 She walked down the hallway.
 
-**2\. Multi-Speaker Tagging**
+**2. Multi-Speaker Tagging**
 
 If using the multi-speaker mode, every paragraph must be explicitly tagged with the character's name exactly as you input it during the script setup.
 
@@ -54,7 +59,9 @@ Sarah: Sam yelled, swiping her volume down.
 
 Run the script from your terminal:
 
-python audiobook\_studio.py
+```bash
+python audiobook_studio.py
+```
 
 The script will prompt you through the setup:
 
@@ -66,4 +73,22 @@ The script will prompt you through the setup:
 6. **File Name:** Enter the target .txt file.  
 7. **Style Prompt:** Enter an atmospheric direction for the read, or press Enter to skip.
 
+### **Director Mode & Live Editing**
+
+When Director Mode is active, each audio chunk plays automatically as it completes:
+
+* **[K]eep:** Commits the current audio take to cache and proceeds to the next chunk.
+* **[R]etry:** Discards the take and immediately re-queries the model with identical text.
+* **[E]dit:** Spawns your text editor to adjust phrasing, fix phonetics, or insert `***` delimiters to split long passages into smaller sub-chunks.
+
 The script will run its pre-flight check and build your cache. If everything clears, it will transmit the chunks and output a single .wav file tagged with your chosen voices, prompting you to clean up the temporary files when finished.
+
+## **Output Files**
+
+* **`{base_name}_{voice_choice}.wav`**: The complete concatenated master audio file (24,000 Hz, 16-bit Mono).
+* **`{base_name}_revised.txt`**: The final stitched manuscript containing every manual revision, phonetic adjustment, and scene split made during the run.
+* **`.tts_cache_{base_name}_{voice_choice}/`**: Hidden working directory storing individual chunk audio files (`chunk_XXX.wav`), active text cards (`chunk_XXX.txt`), and raw original text (`chunk_XXX.orig.txt`).
+
+## **License**
+
+Distributed under the MIT License. Copyright (c) 2026 J.W. Mercer Lab.
