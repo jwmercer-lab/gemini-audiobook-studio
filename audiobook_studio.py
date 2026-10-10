@@ -21,7 +21,7 @@ DEFAULT_MODEL_38 = "gemini-3.8-flash-tts"
 DEFAULT_MODEL_25 = "gemini-2.5-pro-preview-tts"
 
 # Operational character thresholds
-CHAR_LIMIT_38_CHUNKED = 4500
+CHAR_LIMIT_38_CHUNKED = 8000
 CHAR_LIMIT_38_SINGLE_TAKE = 8000
 CHAR_LIMIT_25 = 3000
 DEFAULT_PAUSE_SEC = 1.5
@@ -112,6 +112,55 @@ def clean_text_for_tts(text):
     # Strip redundant trailing pause tags at the end of sections
     cleaned = re.sub(r'<\s*(?:short\s+)?pause\s*>\s*$', '', cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
+
+def parse_chunks_and_delimiters(text):
+    """
+    Splits manuscript on *** (scene pause) and +++ (zero-pause split),
+    returning (chunks, delimiters) where len(delimiters) == max(0, len(chunks) - 1).
+    """
+    if not text:
+        return [], []
+
+    pattern = re.compile(r'^\s*(\*{3,}|\+{3,})\s*$', re.MULTILINE)
+
+    chunks = []
+    delims = []
+    last_pos = 0
+    pending_delim = None
+
+    for match in pattern.finditer(text):
+        segment = text[last_pos:match.start()].strip()
+        raw_delim = match.group(1).strip()
+        delim_type = '+++' if '+' in raw_delim else '***'
+
+        if segment:
+            if chunks and pending_delim is not None:
+                delims.append(pending_delim)
+            chunks.append(segment)
+            pending_delim = delim_type
+        else:
+            pending_delim = delim_type
+        last_pos = match.end()
+
+    final_segment = text[last_pos:].strip()
+    if final_segment:
+        if chunks and pending_delim is not None:
+            delims.append(pending_delim)
+        chunks.append(final_segment)
+
+    return chunks, delims
+
+def serialize_chunks(chunks, delims=None):
+    """Reassembles chunks with their corresponding delimiters."""
+    if not chunks:
+        return ""
+    result = []
+    for i, chk in enumerate(chunks):
+        result.append(chk)
+        if i < len(chunks) - 1:
+            d = delims[i] if (delims and i < len(delims)) else '***'
+            result.append(f"\n\n{d}\n\n")
+    return "".join(result)
 
 def build_request_parts(chunk_text, mode, spk1_name=None, spk2_name=None, style=None, insert_lead_pause=False, default_speaker=None):
     """
@@ -335,7 +384,7 @@ def main():
     else:
         spk1_name = spk2_name = None
         spk1_voice = spk2_voice = None
-        voice_choice = input("Enter Voice Name (e.g. Puck, Kore, Fenrir, Zephyr) [default: Puck]: ").strip() or "Puck"
+        voice_choice = input("Enter Voice Name (e.g. Puck, Kore, Fenrir, Zephyr, Leda) [default: Puck]: ").strip() or "Puck"
 
     filename = args.script
     if not filename:
@@ -348,15 +397,14 @@ def main():
         print(f"Error: Manuscript file '{filename}' not found.")
         sys.exit(1)
 
-    raw_chunks = manuscript_text.split("***")
-    initial_chunks = [c.strip() for c in raw_chunks if c.strip()]
+    initial_chunks, delims = parse_chunks_and_delimiters(manuscript_text)
     total_chunks = len(initial_chunks)
 
     if total_chunks == 0:
         print("Error: No text found in manuscript file.")
         sys.exit(1)
 
-    print(f"\nManuscript loaded: {total_chunks} vignette(s) identified via '***' breaks.")
+    print(f"\nManuscript loaded: {total_chunks} chunk(s) identified across {len(delims)} boundary delimiter(s).")
 
     # Performance style direction
     style_prompt = args.style
@@ -378,6 +426,9 @@ def main():
 
         full_request_parts = []
         for idx, chk in enumerate(initial_chunks, 1):
+            prev_delim = delims[idx - 2] if (idx - 2 < len(delims)) else '***'
+            lead_pause = (idx > 1 and prev_delim != '+++')
+
             if mode == 'm':
                 expected_fallback = spk1_name if (idx % 2 != 0) else spk2_name
                 chk_parts = build_request_parts(
@@ -386,7 +437,7 @@ def main():
                     spk1_name=spk1_name,
                     spk2_name=spk2_name,
                     style=style_prompt,
-                    insert_lead_pause=(idx > 1),
+                    insert_lead_pause=lead_pause,
                     default_speaker=expected_fallback
                 )
             else:
@@ -394,7 +445,7 @@ def main():
                     chunk_text=chk,
                     mode='s',
                     style=style_prompt,
-                    insert_lead_pause=(idx > 1)
+                    insert_lead_pause=lead_pause
                 )
             full_request_parts.extend(chk_parts)
 
@@ -481,10 +532,11 @@ def main():
                 print(f"Error: Manuscript '{filename}' was moved or deleted.")
                 sys.exit(1)
 
-            live_chunks = [c.strip() for c in live_text.split("***") if c.strip()]
+            live_chunks, live_delims = parse_chunks_and_delimiters(live_text)
+            delims = live_delims
             if index > len(live_chunks):
                 print(f"\n[!] Structural mismatch: Expected chunk {index}, but file only contains {len(live_chunks)} chunks.")
-                input("    Restore the '***' delimiters on disk and press ENTER to re-read... ")
+                input("    Restore the '***' or '+++' delimiters on disk and press ENTER to re-read... ")
                 continue
 
             raw_chunk = live_chunks[index - 1]
@@ -494,25 +546,25 @@ def main():
             if char_count > char_limit:
                 print(f"\n[!] Size Warning: Chunk {index} contains {char_count} chars (Configured limit: {char_limit}).")
                 print("    [O]verride and generate anyway")
-                print("    [E]dit chunk in editor (insert '***' to split on the fly)")
+                print("    [E]dit chunk in editor (insert '***' or '+++' to split on the fly)")
                 print("    [R]eload manuscript after external save")
                 action = input("Select action (o/e/r) [default: e]: ").strip().lower() or 'e'
 
                 if action == 'e':
                     edited_block = edit_text_in_editor(raw_chunk)
-                    if "***" in edited_block:
-                        sub_chunks = [c.strip() for c in edited_block.split("***") if c.strip()]
-                        if len(sub_chunks) > 1:
-                            print(f"\n[+] Splitting chunk {index} into {len(sub_chunks)} sub-chunks on disk.")
-                            live_chunks[index - 1 : index] = sub_chunks
-                            with open(filename, "w", encoding="utf-8") as f:
-                                f.write("\n\n***\n\n".join(live_chunks))
-                            total_chunks = len(live_chunks)
-                            raw_chunk = sub_chunks[0]
+                    sub_chunks, sub_delims = parse_chunks_and_delimiters(edited_block)
+                    if len(sub_chunks) > 1:
+                        print(f"\n[+] Splitting chunk {index} into {len(sub_chunks)} sub-chunks on disk.")
+                        live_chunks[index - 1 : index] = sub_chunks
+                        delims[index - 1 : index - 1] = sub_delims
+                        with open(filename, "w", encoding="utf-8") as f:
+                            f.write(serialize_chunks(live_chunks, delims))
+                        total_chunks = len(live_chunks)
+                        raw_chunk = sub_chunks[0]
                     else:
                         live_chunks[index - 1] = edited_block.strip()
                         with open(filename, "w", encoding="utf-8") as f:
-                            f.write("\n\n***\n\n".join(live_chunks))
+                            f.write(serialize_chunks(live_chunks, delims))
                         raw_chunk = edited_block.strip()
                     break
                 elif action == 'o':
@@ -631,22 +683,20 @@ def main():
                     time.sleep(1)
                 elif choice == 'e':
                     edited = edit_text_in_editor(raw_chunk)
-                    if "***" in edited:
-                        sub_chunks = [c.strip() for c in edited.split("***") if c.strip()]
-                        if len(sub_chunks) > 1:
-                            print(f"\n[+] Split Detected: Dividing chunk {index} into {len(sub_chunks)} sub-chunks on disk.")
-                            live_chunks[index - 1 : index] = sub_chunks
-                            with open(filename, "w", encoding="utf-8") as f:
-                                f.write("\n\n***\n\n".join(live_chunks))
-                            total_chunks = len(live_chunks)
-                            raw_chunk = sub_chunks[0]
-                        else:
-                            raw_chunk = edited.strip()
+                    sub_chunks, sub_delims = parse_chunks_and_delimiters(edited)
+                    if len(sub_chunks) > 1:
+                        print(f"\n[+] Split Detected: Dividing chunk {index} into {len(sub_chunks)} sub-chunks on disk.")
+                        live_chunks[index - 1 : index] = sub_chunks
+                        delims[index - 1 : index - 1] = sub_delims
+                        with open(filename, "w", encoding="utf-8") as f:
+                            f.write(serialize_chunks(live_chunks, delims))
+                        total_chunks = len(live_chunks)
+                        raw_chunk = sub_chunks[0]
                     else:
                         raw_chunk = edited.strip()
                         live_chunks[index - 1] = raw_chunk
                         with open(filename, "w", encoding="utf-8") as f:
-                            f.write("\n\n***\n\n".join(live_chunks))
+                            f.write(serialize_chunks(live_chunks, delims))
                     needs_generation = True
                 else:
                     chunk_approved = True
@@ -656,7 +706,7 @@ def main():
     output_filename = f"{base_name}_{voice_choice}.wav"
     output_text_filename = f"{base_name}_revised.txt"
     pause_duration = args.pause
-    print(f"\nAll {total_chunks} chunks approved. Concatenating master release files ({pause_duration}s pauses)...")
+    print(f"\nAll {total_chunks} chunks approved. Concatenating master release files (pause: {pause_duration}s for ***, 0.0s for +++)...")
 
     # Read properties from first chunk to ensure precision stitching
     first_chunk_wav = os.path.join(cache_dir, "chunk_001.wav")
@@ -676,17 +726,20 @@ def main():
                 master_wf.writeframes(chunk_wf.readframes(chunk_wf.getnframes()))
 
             if i < total_chunks:
-                silence_frames = b"\x00" * int(framerate * sampwidth * channels * pause_duration)
-                master_wf.writeframes(silence_frames)
+                delim = delims[i - 1] if (i - 1) < len(delims) else '***'
+                silence_sec = 0.0 if delim == '+++' else pause_duration
+                if silence_sec > 0:
+                    silence_frames = b"\x00" * int(framerate * sampwidth * channels * silence_sec)
+                    master_wf.writeframes(silence_frames)
 
     final_text_chunks = []
     for i in range(1, total_chunks + 1):
         chunk_txt_path = os.path.join(cache_dir, f"chunk_{i:03d}.txt")
         with open(chunk_txt_path, "r", encoding="utf-8") as f:
-            final_text_chunks.append(f.read())
+            final_text_chunks.append(f.read().strip())
 
     with open(output_text_filename, "w", encoding="utf-8") as f:
-        f.write("\n\n***\n\n".join(final_text_chunks))
+        f.write(serialize_chunks(final_text_chunks, delims))
 
     print(f"\n[+] Production Complete!")
     print(f"    Master WAV:     {output_filename}")

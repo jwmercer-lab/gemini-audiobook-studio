@@ -2,7 +2,7 @@
 
 A lightweight, zero-dependency Python production suite for narrating audiobooks, dramatic audio plays, and multi-speaker podcasts using **Google Gemini 3.8 Flash TTS** and **Gemini 2.5 Pro TTS**.
 
-Designed for authors and audio producers, this tool handles turn-by-turn multi-speaker routing, out-of-band performance styling, in-flight live text editing, scene-break pause injection, and resumable session caching.
+Designed for authors and audio producers, this tool handles turn-by-turn multi-speaker routing, out-of-band performance styling, targeted pause injection, in-flight live text editing, and resumable session caching.
 
 ---
 
@@ -11,10 +11,13 @@ Designed for authors and audio producers, this tool handles turn-by-turn multi-s
 * **Dual Workflows:**
   * **[1] Chunked Director Mode:** Audition, approve, re-roll, or edit each scene/vignette individually as it generates.
   * **[2] Full Story Single-Take:** Synthesizes an entire multi-speaker manuscript in one continuous API call with automatic turn-taking.
+* **Targeted Delimiters (`***` vs `+++`):**
+  * **`***` (Scene Break):** Injects digital silence pause (configured via `--pause`, default: `1.5s`).
+  * **`+++` (Seamless Split):** Stitches adjacent chunks with zero silence (`0.0s`), perfect for dividing long scenes without breaking conversational pacing.
 * **Turn-Based Multi-Speaker Routing:** Automatically parses dialogue tags (e.g., `Narrator:`, `Sam:`) into structured `speech_metadata.speaker` turns. The engine speaks pure verbatim dialogue without reading character names aloud.
 * **Stage Direction & Tag Sanitization:** Strips bracketed stage notes (`[SCENE TRANSITION: ...]`) and comments (`#`) so foley cues are never read aloud. Automatically converts invalid `<long pause>` tags into supported pause tokens.
 * **Dual-Match Quota Caching:** Saves approved `.wav` takes alongside normalized script buffers. Re-running after a crash or network interruption resumes where you left off without burning API tokens.
-* **In-Flight System Editor:** Launches your OS editor (`Notepad` on Windows, `TextEdit` on macOS, GUI/`nano` on Linux) whenever an edit or split is needed. Inserting `***` divides long passages into sub-chunks on the fly.
+* **In-Flight System Editor:** Launches your OS editor (`Notepad` on Windows, `TextEdit` on macOS, GUI/`nano` on Linux) whenever an edit or split is needed. Inserting `***` or `+++` divides long passages into sub-chunks on the fly.
 * **Zero Audio Dependencies:** Uses Python's native `wave` library to stitch 24 kHz 16-bit Mono master WAVs with configurable digital silence pauses. No FFmpeg, PyDub, or NumPy required.
 
 ---
@@ -23,7 +26,7 @@ Designed for authors and audio producers, this tool handles turn-by-turn multi-s
 
 | Model Engine | Model ID | Recommended Chunk | Max Single-Take | Ideal Use Case |
 | :--- | :--- | :--- | :--- | :--- |
-| **Gemini 3.8 Flash TTS (Flagship)** | `gemini-3.8-flash-tts` | **4,500 chars** | **8,000 chars** | High emotional fidelity, dramatic pacing, multi-speaker dialogues |
+| **Gemini 3.8 Flash TTS (Flagship)** | `gemini-3.8-flash-tts` | **8,000 chars** | **8,000 chars** | High emotional fidelity, dramatic pacing, multi-speaker dialogues |
 | **Gemini 2.5 Pro TTS (Fallback)** | `gemini-2.5-pro-preview-tts` | **3,000 chars** | **4,000 chars** | Extended continuity, steady narrative prose |
 
 ---
@@ -38,6 +41,8 @@ Designed for authors and audio producers, this tool handles turn-by-turn multi-s
 | **`Zephyr`** | Bright / Energetic | Youthful, inquisitive, fast-paced modern narrator |
 | **`Charon`** | Informative / Steady | Classic documentary or non-fiction audiobook narrator |
 | **`Aoede`** | Breezy / Warm | Conversational storyteller, light drama |
+| **`Leda`** | Youthful / Clear | Contemporary, modern adolescent protagonist, fast-paced dialogue |
+| **`Sadaltager`** | Mature / Knowledgeable | Institutional, clinical, detached psychological realism |
 
 ---
 
@@ -56,7 +61,7 @@ Designed for authors and audio producers, this tool handles turn-by-turn multi-s
    *(Only requires Python 3.10+ and `requests`).*
 
 3. **Set your Google Gemini API Key:**
-   Get a free or paid API key from [Google AI Studio](https://aistudio.google.com/apikey).
+   Get an API key from [Google AI Studio](https://aistudio.google.com/apikey).
 
    * **Linux/macOS:**
      ```bash
@@ -75,16 +80,23 @@ Designed for authors and audio producers, this tool handles turn-by-turn multi-s
 
 ## **Manuscript Formatting Guide**
 
-### 1. Scene Breaks (`***`)
-Separate scenes, vignettes, or paragraphs using three asterisks on their own line:
+### 1. Scene Breaks & Technical Splits
+* **Full Scene Transitions (`***`):** Inserts configured silence (`--pause`, e.g. 1.5s):
+  ```text
+  The heavy door swung shut against the rain.
 
-```text
-The heavy door swung shut against the rain. Marcus set his pack on the floorboards.
+  ***
 
-***
+  Across the counter, Sarah was already loading the ledger.
+  ```
+* **Seamless Intra-Scene Splits (`+++`):** Stitches with zero latency (`0.0s`):
+  ```text
+  She aligned the metal end of the cord with the charging port and shoved.
 
-Across the counter, Sarah was already loading the ledger into her bag.
-```
+  +++
+
+  “There,” she rasped. “I solved your puzzle; now your Pad won’t die.”
+  ```
 
 ### 2. Multi-Speaker Dialogue
 Prefix character lines with their configured name followed by a colon or dash. The engine strips the prefix and assigns the turn to the actor's designated voice:
@@ -119,7 +131,7 @@ You can also launch directly with arguments:
 python audiobook_studio.py story.txt --workflow single-take --mode m --style "Dramatic narration, natural volume"
 
 # Director Mode with a custom 2.0-second scene pause
-python audiobook_studio.py story.txt --workflow chunked --mode m --pause 2.0
+python audiobook_studio.py story.txt --workflow chunked --mode s --pause 2.0
 ```
 
 ### CLI Flag Reference
@@ -139,14 +151,14 @@ When Chunked Director Mode is active, each audio file auditions automatically in
 
 * **`[K]eep` (default):** Approves the take, commits it to the cache directory, and advances to the next scene.
 * **`[R]e-roll`:** Discards the take and queries Gemini again for a fresh delivery and cadence.
-* **`[E]dit`:** Spawns your operating system's native text editor. Adjust words, fix pronunciations, or add `***` to split an oversized chunk into smaller pieces.
+* **`[E]dit`:** Spawns your operating system's native text editor. Adjust words, fix pronunciations, or add `***` or `+++` to split an oversized chunk into smaller pieces.
 
 ---
 
 ## **Output Artifacts**
 
 * **`{script}_{voices}.wav`**: Concatenated 24 kHz, 16-bit Mono master audio release.
-* **`{script}_revised.txt`**: Stitched manuscript capturing all runtime edits and inline scene splits.
+* **`{script}_revised.txt`**: Stitched manuscript capturing all runtime edits and delimiter placements.
 * **`.tts_cache_{script}_{voices}/`**: Session cache containing isolated takes (`chunk_001.wav`), active text cards (`chunk_001.txt`), and source references (`chunk_001.orig.txt`).
 
 ---
