@@ -1,94 +1,156 @@
-# **Gemini Audiobook Studio**
+# **Gemini Audiobook Production Studio**
 
-A lightweight, high-precision Python script for narrating stories and scripts using Google's Gemini TTS models. This tool handles hard scene breaks, multi-speaker dialogues, pre-flight payload validation, and rate limit survival to ensure you don't waste API quota on broken requests.
+A lightweight, zero-dependency Python production suite for narrating audiobooks, dramatic audio plays, and multi-speaker podcasts using **Google Gemini 3.8 Flash TTS** and **Gemini 2.5 Pro TTS**.
 
-## **Features**
+Designed for authors and audio producers, this tool handles turn-by-turn multi-speaker routing, out-of-band performance styling, in-flight live text editing, scene-break pause injection, and resumable session caching.
 
-* **Multi-Speaker Support:** Natively supports two-character dialogue by mapping inline tags (e.g., Sarah: and Sam:) to distinct Gemini voices.
-* **In-Flight System Editor:** Automatically launches your desktop text editor (xed, gedit, mousepad, kate on Linux; TextEdit on macOS; Notepad on Windows) whenever an edit is needed.
-* **Dynamic Inline Splitting:** Adding `***` inside the editor splits an oversized chunk on the fly, updates the source text on disk, and recalculates the queue automatically.
-* **Safety Filter Interception:** Catches tripped content filters mid-generation and opens an editor buffer so you can adjust phrasing and retry without aborting the session.
-* **Dual-Match Caching:** Saves generated `.wav` files alongside both modified `.txt` and original `.orig.txt` records, using newline normalization to prevent redundant API calls.
-* **Director Mode:** Audition chunks as they finish generating with immediate options to keep, re-roll, or open the text editor for real-time rewrites.
-* **Dual Master Export:** Automatically stitches the full 24kHz master audio file and outputs an updated manuscript (`_revised.txt`) reflecting all runtime edits.
-* **Zero Audio Dependencies:** Concatenates raw audio frames using Python's native `wave` library with no FFmpeg or third-party audio packages required.
+---
 
-## **Prerequisites**
+## **Key Features**
 
-1. **Python 3.10+**: Requires a modern Python environment.  
-2. **Google Gemini API Key**: A valid REST API key from Google AI Studio.
-3. **Supported Text Editor**:
-   * **Linux:** Uses `xed`, `gedit`, `mousepad`, `kate`, or falls back to `$EDITOR` / `nano`.
-   * **macOS:** Uses `TextEdit`.
-   * **Windows:** Uses `Notepad`.
+* **Dual Workflows:**
+  * **[1] Chunked Director Mode:** Audition, approve, re-roll, or edit each scene/vignette individually as it generates.
+  * **[2] Full Story Single-Take:** Synthesizes an entire multi-speaker manuscript in one continuous API call with automatic turn-taking.
+* **Turn-Based Multi-Speaker Routing:** Automatically parses dialogue tags (e.g., `Narrator:`, `Sam:`) into structured `speech_metadata.speaker` turns. The engine speaks pure verbatim dialogue without reading character names aloud.
+* **Stage Direction & Tag Sanitization:** Strips bracketed stage notes (`[SCENE TRANSITION: ...]`) and comments (`#`) so foley cues are never read aloud. Automatically converts invalid `<long pause>` tags into supported pause tokens.
+* **Dual-Match Quota Caching:** Saves approved `.wav` takes alongside normalized script buffers. Re-running after a crash or network interruption resumes where you left off without burning API tokens.
+* **In-Flight System Editor:** Launches your OS editor (`Notepad` on Windows, `TextEdit` on macOS, GUI/`nano` on Linux) whenever an edit or split is needed. Inserting `***` divides long passages into sub-chunks on the fly.
+* **Zero Audio Dependencies:** Uses Python's native `wave` library to stitch 24 kHz 16-bit Mono master WAVs with configurable digital silence pauses. No FFmpeg, PyDub, or NumPy required.
 
-*Note: FFmpeg, Numpy, and Pydub are not required.*
+---
 
-## **Setup & Installation**
+## **Engine Models & Character Limits**
 
-1. **Setup the Directory:**  
-   Create a folder for your project and place `audiobook_studio.py` and your text files inside it.  
-2. **Install Python Libraries:**  
-   The script relies almost entirely on standard library modules. Install the single external dependency:  
+| Model Engine | Model ID | Recommended Chunk | Max Single-Take | Ideal Use Case |
+| :--- | :--- | :--- | :--- | :--- |
+| **Gemini 3.8 Flash TTS (Flagship)** | `gemini-3.8-flash-tts` | **4,500 chars** | **8,000 chars** | High emotional fidelity, dramatic pacing, multi-speaker dialogues |
+| **Gemini 2.5 Pro TTS (Fallback)** | `gemini-2.5-pro-preview-tts` | **3,000 chars** | **4,000 chars** | Extended continuity, steady narrative prose |
+
+---
+
+## **Prebuilt Voice Roster**
+
+| Voice | Gender / Quality | Best Character Archetype |
+| :--- | :--- | :--- |
+| **`Puck`** | Young / Upbeat / Mid-High | Anxious apprentice, young protagonist, brisk conversationalist |
+| **`Kore`** | Delicate / Breathy / Clear | Poised heroine, porcelain elegance, fragile or intimate narration |
+| **`Fenrir`** | Deep / Gravelly / Firm | Authoritative commander, grizzled detective, antagonist |
+| **`Zephyr`** | Bright / Energetic | Youthful, inquisitive, fast-paced modern narrator |
+| **`Charon`** | Informative / Steady | Classic documentary or non-fiction audiobook narrator |
+| **`Aoede`** | Breezy / Warm | Conversational storyteller, light drama |
+
+---
+
+## **Installation**
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/your-username/gemini-audiobook-studio.git
+   cd gemini-audiobook-studio
+   ```
+
+2. **Install requirements:**
    ```bash
    pip install -r requirements.txt
    ```
+   *(Only requires Python 3.10+ and `requests`).*
 
-## **Text Formatting Rules**
+3. **Set your Google Gemini API Key:**
+   Get a free or paid API key from [Google AI Studio](https://aistudio.google.com/apikey).
 
-**1. Scene Breaks**
+   * **Linux/macOS:**
+     ```bash
+     export GEMINI_API_KEY="your-api-key-here"
+     ```
+   * **Windows (Command Prompt):**
+     ```cmd
+     set GEMINI_API_KEY="your-api-key-here"
+     ```
+   * **Windows (PowerShell):**
+     ```powershell
+     $env:GEMINI_API_KEY="your-api-key-here"
+     ```
 
-Break your text into smaller chunks using three asterisks on their own line. Remember to stay under the character limit for your chosen model (2000 for Flash, 3000 for Pro).
+---
 
-The heavy door swung shut.
+## **Manuscript Formatting Guide**
+
+### 1. Scene Breaks (`***`)
+Separate scenes, vignettes, or paragraphs using three asterisks on their own line:
+
+```text
+The heavy door swung shut against the rain. Marcus set his pack on the floorboards.
 
 ***
 
-She walked down the hallway.
+Across the counter, Sarah was already loading the ledger into her bag.
+```
 
-**2. Multi-Speaker Tagging**
+### 2. Multi-Speaker Dialogue
+Prefix character lines with their configured name followed by a colon or dash. The engine strips the prefix and assigns the turn to the actor's designated voice:
 
-If using the multi-speaker mode, every paragraph must be explicitly tagged with the character's name exactly as you input it during the script setup.
+```text
+Narrator: The blue light burned against the frosted glass.
 
-Sarah: The blue light burned Sarah’s eyes. 
+Sam: "Listen to me," he whispered, stepping between her and the counter.
 
-Sam: "Listen to me,"  
-Sarah: Sam yelled, swiping her volume down.
+Sarah: "I don't need your protection, Sam."
+```
 
-## **Usage**
+### 3. Stage Directions & Non-Verbal Tags
+* **Stage Directions (Filtered):** Bracketed notes like `[SCENE TRANSITION: Bell rings]` or developer comments `# Note to self` are automatically stripped before sending to the TTS engine.
+* **Inline Vocal Bursts:** Supported native tags include `<short pause>`, `<pause>`, and `<whisper>`.
 
-Run the script from your terminal:
+---
 
+## **Usage & CLI Commands**
+
+### Interactive Mode (Default)
+Run without flags to step through the guided setup:
 ```bash
 python audiobook_studio.py
 ```
 
-The script will prompt you through the setup:
+### Command Line Flags
+You can also launch directly with arguments:
 
-1. **API Key:** Paste your key securely.  
-2. **Mode:** Select s (single) or m (multi-speaker).  
-3. **Director Mode:** Enable to listen and approve chunks dynamically as they are generated.  
-4. **Model:** Hit Enter to use the default 3.1-flash, or type pro to fall back to 2.5-pro.  
-5. **Speaker Setup (Multi-mode):** Define the names found in your text and map them to Gemini voices.  
-6. **File Name:** Enter the target .txt file.  
-7. **Style Prompt:** Enter an atmospheric direction for the read, or press Enter to skip.
+```bash
+# Full Story Single-Take Pass
+python audiobook_studio.py story.txt --workflow single-take --mode m --style "Dramatic narration, natural volume"
 
-### **Director Mode & Live Editing**
+# Director Mode with a custom 2.0-second scene pause
+python audiobook_studio.py story.txt --workflow chunked --mode m --pause 2.0
+```
 
-When Director Mode is active, each audio chunk plays automatically as it completes:
+### CLI Flag Reference
+* `script`: Path to your `.txt` manuscript.
+* `--key`: Gemini API key (defaults to `$GEMINI_API_KEY`).
+* `--workflow`: `chunked` (Director review) or `single-take` (full pass).
+* `--mode`: `s` (Single voice) or `m` (Multi-speaker).
+* `--model`: `3.8-flash` (default) or `2.5-pro`.
+* `--style`: Out-of-band performance direction.
+* `--pause`: Digital silence between scenes in seconds (default: `1.5`).
 
-* **[K]eep:** Commits the current audio take to cache and proceeds to the next chunk.
-* **[R]etry:** Discards the take and immediately re-queries the model with identical text.
-* **[E]dit:** Spawns your text editor to adjust phrasing, fix phonetics, or insert `***` delimiters to split long passages into smaller sub-chunks.
+---
 
-The script will run its pre-flight check and build your cache. If everything clears, it will transmit the chunks and output a single .wav file tagged with your chosen voices, prompting you to clean up the temporary files when finished.
+## **Director Mode Workflow**
 
-## **Output Files**
+When Chunked Director Mode is active, each audio file auditions automatically in your media player as soon as synthesis completes:
 
-* **`{base_name}_{voice_choice}.wav`**: The complete concatenated master audio file (24,000 Hz, 16-bit Mono).
-* **`{base_name}_revised.txt`**: The final stitched manuscript containing every manual revision, phonetic adjustment, and scene split made during the run.
-* **`.tts_cache_{base_name}_{voice_choice}/`**: Hidden working directory storing individual chunk audio files (`chunk_XXX.wav`), active text cards (`chunk_XXX.txt`), and raw original text (`chunk_XXX.orig.txt`).
+* **`[K]eep` (default):** Approves the take, commits it to the cache directory, and advances to the next scene.
+* **`[R]e-roll`:** Discards the take and queries Gemini again for a fresh delivery and cadence.
+* **`[E]dit`:** Spawns your operating system's native text editor. Adjust words, fix pronunciations, or add `***` to split an oversized chunk into smaller pieces.
+
+---
+
+## **Output Artifacts**
+
+* **`{script}_{voices}.wav`**: Concatenated 24 kHz, 16-bit Mono master audio release.
+* **`{script}_revised.txt`**: Stitched manuscript capturing all runtime edits and inline scene splits.
+* **`.tts_cache_{script}_{voices}/`**: Session cache containing isolated takes (`chunk_001.wav`), active text cards (`chunk_001.txt`), and source references (`chunk_001.orig.txt`).
+
+---
 
 ## **License**
 
-Distributed under the MIT License. Copyright (c) 2026 J.W. Mercer Lab.
+Distributed under the MIT License. Open-source and free for commercial and non-commercial audiobook production.
